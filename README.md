@@ -64,3 +64,32 @@ Use these settings on Render, Railway, Fly.io, Google Cloud Run, or a similar co
 - Public MCP URL: `https://<your-domain>/mcp`
 
 For container platforms that run the `Dockerfile` directly, set only `MCP_BEARER_TOKEN`; the `CMD` is already included.
+
+## CrewAI
+
+CrewAI can connect to the same remote MCP endpoint with direct bearer-token headers.
+
+Install CrewAI MCP support in your agent project:
+
+```bash
+uv add crewai
+```
+
+Set environment variables:
+
+```bash
+export MCP_URL="https://mcp-dh2a.onrender.com/mcp"
+export MCP_BEARER_TOKEN="your-render-mcp-token"
+```
+
+Use `examples/crewai_remote_mcp.py` as a starting point. The key configuration is:
+
+```python
+from crewai.mcp import MCPServerHTTP
+
+tools = MCPServerHTTP(
+    url="https://mcp-dh2a.onrender.com/mcp",
+    headers={"Authorization": f"Bearer {MCP_BEARER_TOKEN}"},
+    cache_tools_list=True,
+)
+```
