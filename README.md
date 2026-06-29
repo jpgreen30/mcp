@@ -1,0 +1,56 @@
+# Cloud Tools Gateway
+
+Remote MCP tools server built with Python, FastMCP, Streamable HTTP, and static bearer-token authentication.
+
+## Local Development
+
+```powershell
+uv sync
+$env:MCP_BEARER_TOKEN = "replace-with-a-long-random-secret"
+uv run uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+MCP endpoint:
+
+```text
+http://localhost:8000/mcp
+```
+
+Clients must send:
+
+```text
+Authorization: Bearer replace-with-a-long-random-secret
+```
+
+## Tools
+
+- `fetch_webpage`: fetches a URL and returns clean text plus page metadata.
+- `extract_links`: extracts normalized links from a URL.
+- `check_url_status`: checks URL reachability, status, timing, and headers.
+- `analyze_text`: returns basic text statistics and top terms.
+
+## Docker
+
+Build:
+
+```bash
+docker build -t cloud-tools-gateway .
+```
+
+Run:
+
+```bash
+docker run --rm -p 8000:8000 -e MCP_BEARER_TOKEN="replace-with-a-long-random-secret" cloud-tools-gateway
+```
+
+## Cloud Deployment
+
+Use these settings on Render, Railway, Fly.io, Google Cloud Run, or a similar container host:
+
+- Build command: `docker build -t cloud-tools-gateway .`
+- Run command: `uv run --frozen uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Required environment variable: `MCP_BEARER_TOKEN`
+- Optional environment variable: `MCP_CLIENT_ID`
+- Public MCP URL: `https://<your-domain>/mcp`
+
+For container platforms that run the `Dockerfile` directly, set only `MCP_BEARER_TOKEN`; the `CMD` is already included.
