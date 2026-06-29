@@ -22,6 +22,15 @@ Clients must send:
 Authorization: Bearer replace-with-a-long-random-secret
 ```
 
+For ChatGPT custom connectors, use OAuth authentication. The server exposes:
+
+- Authorization metadata: `/.well-known/oauth-authorization-server`
+- Authorization URL: `/oauth/authorize`
+- Token URL: `/oauth/token`
+- MCP resource: `/mcp`
+
+Set `PUBLIC_BASE_URL` in production, for example `https://mcp-dh2a.onrender.com`.
+
 ## Tools
 
 - `fetch_webpage`: fetches a URL and returns clean text plus page metadata.
@@ -50,6 +59,7 @@ Use these settings on Render, Railway, Fly.io, Google Cloud Run, or a similar co
 - Build command: `docker build -t cloud-tools-gateway .`
 - Run command: `uv run --frozen uvicorn main:app --host 0.0.0.0 --port $PORT`
 - Required environment variable: `MCP_BEARER_TOKEN`
+- Recommended environment variable: `PUBLIC_BASE_URL`
 - Optional environment variable: `MCP_CLIENT_ID`
 - Public MCP URL: `https://<your-domain>/mcp`
 

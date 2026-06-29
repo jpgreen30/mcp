@@ -2,22 +2,27 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 from collections import Counter
 from html import unescape
 from time import time
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from pydantic import AnyHttpUrl, Field
+from starlette.requests import Request
+from starlette.responses import JSONResponse, RedirectResponse, Response
 
 
 DEFAULT_TIMEOUT_SECONDS = 12.0
 DEFAULT_USER_AGENT = "Cloud-Tools-Gateway/0.1 (+https://modelcontextprotocol.io)"
 MAX_RESPONSE_CHARS = 60_000
+AUTH_CODE_TTL_SECONDS = 300
+_auth_codes: dict[str, dict[str, Any]] = {}
 
 
 class StaticBearerAuth(TokenVerifier):
@@ -44,6 +49,146 @@ mcp = FastMCP(
     ),
     auth=StaticBearerAuth(),
 )
+
+
+def _public_base_url(request: Request) -> str:
+    configured = os.getenv("PUBLIC_BASE_URL")
+    if configured:
+        return configured.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def _oauth_metadata(request: Request) -> dict[str, Any]:
+    base_url = _public_base_url(request)
+    return {
+        "issuer": base_url,
+        "authorization_endpoint": f"{base_url}/oauth/authorize",
+        "token_endpoint": f"{base_url}/oauth/token",
+        "registration_endpoint": f"{base_url}/oauth/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256", "plain"],
+        "token_endpoint_auth_methods_supported": [
+            "none",
+            "client_secret_post",
+            "client_secret_basic",
+        ],
+        "scopes_supported": ["tools:read", "tools:execute"],
+    }
+
+
+@mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+async def health_check(request: Request) -> Response:
+    return JSONResponse({"ok": True, "service": "Cloud-Tools-Gateway"})
+
+
+@mcp.custom_route(
+    "/.well-known/oauth-authorization-server",
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def oauth_authorization_server_metadata(request: Request) -> Response:
+    return JSONResponse(_oauth_metadata(request))
+
+
+@mcp.custom_route(
+    "/.well-known/oauth-authorization-server/mcp",
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def oauth_authorization_server_metadata_for_mcp(request: Request) -> Response:
+    return JSONResponse(_oauth_metadata(request))
+
+
+@mcp.custom_route(
+    "/.well-known/oauth-protected-resource",
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def oauth_protected_resource_metadata(request: Request) -> Response:
+    base_url = _public_base_url(request)
+    return JSONResponse(
+        {
+            "resource": f"{base_url}/mcp",
+            "authorization_servers": [base_url],
+            "scopes_supported": ["tools:read", "tools:execute"],
+        }
+    )
+
+
+@mcp.custom_route(
+    "/.well-known/oauth-protected-resource/mcp",
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def oauth_protected_resource_metadata_for_mcp(request: Request) -> Response:
+    return await oauth_protected_resource_metadata(request)
+
+
+@mcp.custom_route("/oauth/register", methods=["POST"], include_in_schema=False)
+async def oauth_register(request: Request) -> Response:
+    body = await request.json()
+    return JSONResponse(
+        {
+            "client_id": body.get("client_name", "chatgpt"),
+            "client_id_issued_at": int(time()),
+            "redirect_uris": body.get("redirect_uris", []),
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        },
+        status_code=201,
+    )
+
+
+@mcp.custom_route("/oauth/authorize", methods=["GET"], include_in_schema=False)
+async def oauth_authorize(request: Request) -> Response:
+    params = request.query_params
+    redirect_uri = params.get("redirect_uri")
+    if not redirect_uri:
+        return JSONResponse({"error": "invalid_request", "error_description": "Missing redirect_uri"}, status_code=400)
+
+    code = secrets.token_urlsafe(32)
+    _auth_codes[code] = {
+        "client_id": params.get("client_id", ""),
+        "redirect_uri": redirect_uri,
+        "expires_at": time() + AUTH_CODE_TTL_SECONDS,
+        "scope": params.get("scope", "tools:read tools:execute"),
+    }
+    redirect_params = {"code": code}
+    if state := params.get("state"):
+        redirect_params["state"] = state
+    separator = "&" if "?" in redirect_uri else "?"
+    return RedirectResponse(f"{redirect_uri}{separator}{urlencode(redirect_params)}")
+
+
+@mcp.custom_route("/oauth/token", methods=["POST"], include_in_schema=False)
+async def oauth_token(request: Request) -> Response:
+    form = await request.form()
+    if form.get("grant_type") != "authorization_code":
+        return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+
+    code = str(form.get("code", ""))
+    code_record = _auth_codes.pop(code, None)
+    if not code_record or code_record["expires_at"] < time():
+        return JSONResponse({"error": "invalid_grant"}, status_code=400)
+
+    redirect_uri = str(form.get("redirect_uri", ""))
+    if redirect_uri and redirect_uri != code_record["redirect_uri"]:
+        return JSONResponse({"error": "invalid_grant"}, status_code=400)
+
+    token = os.getenv("MCP_BEARER_TOKEN")
+    if not token:
+        return JSONResponse({"error": "server_error"}, status_code=500)
+
+    return JSONResponse(
+        {
+            "access_token": token,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": code_record["scope"],
+        }
+    )
 
 
 def _clean_text(text: str) -> str:
