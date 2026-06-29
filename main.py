@@ -22,6 +22,13 @@ DEFAULT_TIMEOUT_SECONDS = 12.0
 DEFAULT_USER_AGENT = "Cloud-Tools-Gateway/0.1 (+https://modelcontextprotocol.io)"
 MAX_RESPONSE_CHARS = 60_000
 AUTH_CODE_TTL_SECONDS = 300
+CREWAI_DEFAULT_PAYLOAD_FIELDS = {
+    "taskWebhookUrl": "",
+    "stepWebhookUrl": "",
+    "crewWebhookUrl": "",
+    "trainingFilename": "",
+    "generateArtifact": False,
+}
 _auth_codes: dict[str, dict[str, Any]] = {}
 
 
@@ -341,6 +348,92 @@ async def analyze_text(
         "estimated_reading_minutes": round(len(words) / 225, 2),
         "top_terms": [{"term": term, "count": count} for term, count in top_terms],
     }
+
+
+def _crewai_config() -> tuple[str, str]:
+    api_url = os.getenv("CREWAI_API_URL", "").rstrip("/")
+    token = os.getenv("CREWAI_BEARER_TOKEN", "")
+    if not api_url or not token:
+        raise ValueError("CREWAI_API_URL and CREWAI_BEARER_TOKEN must be configured")
+    return api_url, token
+
+
+async def _crewai_request(
+    method: str,
+    path: str,
+    *,
+    json_body: dict[str, Any] | None = None,
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
+    api_url, token = _crewai_config()
+    normalized_path = "/" + path.lstrip("/")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
+        response = await client.request(
+            method.upper(),
+            f"{api_url}{normalized_path}",
+            headers=headers,
+            json=json_body,
+        )
+
+    content_type = response.headers.get("content-type", "")
+    try:
+        data: Any = response.json() if "json" in content_type else response.text
+    except ValueError:
+        data = response.text
+
+    return {
+        "ok": response.is_success,
+        "status_code": response.status_code,
+        "url": str(response.url),
+        "data": data,
+    }
+
+
+@mcp.tool()
+async def run_crewai_automation(
+    instructions: str = Field(
+        min_length=1,
+        max_length=20_000,
+        description="Natural-language order or task for the CrewAI automation.",
+    ),
+    extra_inputs: dict[str, Any] | None = None,
+    generate_artifact: bool = False,
+) -> dict[str, Any]:
+    """Start the configured CrewAI automation through its deployed /kickoff API."""
+    inputs = {"instructions": instructions}
+    if extra_inputs:
+        inputs.update(extra_inputs)
+
+    payload = {
+        "inputs": inputs,
+        **CREWAI_DEFAULT_PAYLOAD_FIELDS,
+        "generateArtifact": generate_artifact,
+    }
+    return await _crewai_request("POST", "/kickoff", json_body=payload)
+
+
+@mcp.tool()
+async def call_crewai_endpoint(
+    method: str = Field(pattern="^(GET|POST)$"),
+    path: str = Field(
+        min_length=1,
+        max_length=200,
+        description="CrewAI deployment API path, such as /kickoff or /inputs.",
+    ),
+    json_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Call a safe GET or POST path on the configured CrewAI deployment API."""
+    if not path.startswith("/"):
+        path = f"/{path}"
+    blocked_fragments = {"..", "reset", "delete", "settings"}
+    if any(fragment in path.lower() for fragment in blocked_fragments):
+        raise ValueError("This CrewAI endpoint path is blocked by the MCP gateway")
+    return await _crewai_request(method, path, json_body=json_body)
 
 
 app = mcp.http_app(path="/mcp", transport="streamable-http")

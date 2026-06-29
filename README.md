@@ -37,6 +37,8 @@ Set `PUBLIC_BASE_URL` in production, for example `https://mcp-dh2a.onrender.com`
 - `extract_links`: extracts normalized links from a URL.
 - `check_url_status`: checks URL reachability, status, timing, and headers.
 - `analyze_text`: returns basic text statistics and top terms.
+- `run_crewai_automation`: sends an order to a configured CrewAI deployment.
+- `call_crewai_endpoint`: calls safe GET/POST paths on the configured CrewAI deployment API.
 
 ## Docker
 
@@ -61,6 +63,7 @@ Use these settings on Render, Railway, Fly.io, Google Cloud Run, or a similar co
 - Required environment variable: `MCP_BEARER_TOKEN`
 - Recommended environment variable: `PUBLIC_BASE_URL`
 - Optional environment variable: `MCP_CLIENT_ID`
+- Optional CrewAI bridge variables: `CREWAI_API_URL`, `CREWAI_BEARER_TOKEN`
 - Public MCP URL: `https://<your-domain>/mcp`
 
 For container platforms that run the `Dockerfile` directly, set only `MCP_BEARER_TOKEN`; the `CMD` is already included.
@@ -93,3 +96,17 @@ tools = MCPServerHTTP(
     cache_tools_list=True,
 )
 ```
+
+## ChatGPT To CrewAI Bridge
+
+To let ChatGPT give orders to a CrewAI deployment through this MCP server, configure these environment variables on the MCP deployment:
+
+```bash
+CREWAI_API_URL="https://your-crew-deployment.crewai.com"
+CREWAI_BEARER_TOKEN="your-crewai-deployment-bearer-token"
+```
+
+After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
+
+- `run_crewai_automation`: starts the configured CrewAI deployment via `/kickoff`.
+- `call_crewai_endpoint`: makes constrained GET/POST calls to the CrewAI deployment API.
