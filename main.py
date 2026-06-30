@@ -450,14 +450,14 @@ async def run_crewai_automation(
 
 @mcp.tool()
 async def run_crewai_workflow(
+    inputs: dict[str, Any] = Field(
+        description="CrewAI inputs payload, for example {'user_name': 'Jean'}.",
+    ),
     workflow_id: str = Field(
         default="default",
         min_length=1,
         max_length=100,
         description="Logical CrewAI workflow id. The current deployment supports 'default'.",
-    ),
-    inputs: dict[str, Any] = Field(
-        description="CrewAI inputs payload, for example {'user_name': 'Jean'}.",
     ),
 ) -> dict[str, Any]:
     """Run a CrewAI workflow using POST /kickoff with {'inputs': {...}}."""
