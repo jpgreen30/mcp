@@ -394,6 +394,37 @@ async def _crewai_request(
     }
 
 
+def _extract_kickoff_id(response: dict[str, Any]) -> str | None:
+    data = response.get("data")
+    if isinstance(data, dict):
+        value = data.get("kickoff_id") or data.get("kickoff_uuid") or data.get("id")
+        return str(value) if value else None
+    return None
+
+
+def _extract_status_result(status_response: dict[str, Any]) -> dict[str, Any]:
+    data = status_response.get("data")
+    if not isinstance(data, dict):
+        return {"state": None, "status": None, "result": None, "raw": status_response}
+
+    result = data.get("result")
+    if result is None:
+        result = data.get("result_json")
+    if result is None and isinstance(data.get("last_executed_task"), dict):
+        result = data["last_executed_task"].get("output")
+    if result is None and isinstance(data.get("last_step"), dict):
+        result = data["last_step"].get("result") or data["last_step"].get("prompt")
+
+    return {
+        "state": data.get("state"),
+        "status": data.get("status"),
+        "result": result,
+        "result_json": data.get("result_json"),
+        "last_executed_task": data.get("last_executed_task"),
+        "raw": data,
+    }
+
+
 @mcp.tool()
 async def run_crewai_automation(
     instructions: str = Field(
@@ -415,6 +446,62 @@ async def run_crewai_automation(
         "generateArtifact": generate_artifact,
     }
     return await _crewai_request("POST", "/kickoff", json_body=payload)
+
+
+@mcp.tool()
+async def run_crewai_workflow(
+    workflow_id: str = Field(
+        default="default",
+        min_length=1,
+        max_length=100,
+        description="Logical CrewAI workflow id. The current deployment supports 'default'.",
+    ),
+    inputs: dict[str, Any] = Field(
+        description="CrewAI inputs payload, for example {'user_name': 'Jean'}.",
+    ),
+) -> dict[str, Any]:
+    """Run a CrewAI workflow using POST /kickoff with {'inputs': {...}}."""
+    if workflow_id != "default":
+        raise ValueError("Only workflow_id='default' is configured for this gateway")
+
+    input_spec = await _crewai_request("GET", "/inputs")
+    kickoff = await _crewai_request("POST", "/kickoff", json_body={"inputs": inputs})
+    kickoff_id = _extract_kickoff_id(kickoff)
+
+    return {
+        "ok": kickoff["ok"],
+        "workflow_id": workflow_id,
+        "kickoff_id": kickoff_id,
+        "input_spec": input_spec.get("data"),
+        "kickoff": kickoff,
+    }
+
+
+@mcp.tool()
+async def get_crewai_status(
+    kickoff_id: str = Field(min_length=1, max_length=100),
+) -> dict[str, Any]:
+    """Get CrewAI workflow status from GET /status/{kickoff_id}."""
+    return await _crewai_request("GET", f"/status/{kickoff_id}")
+
+
+@mcp.tool()
+async def get_crewai_result(
+    kickoff_id: str = Field(min_length=1, max_length=100),
+) -> dict[str, Any]:
+    """Read the final CrewAI result from GET /status/{kickoff_id}."""
+    status_response = await get_crewai_status(kickoff_id)
+    parsed = _extract_status_result(status_response)
+    return {
+        "ok": status_response["ok"],
+        "kickoff_id": kickoff_id,
+        "state": parsed["state"],
+        "status": parsed["status"],
+        "result": parsed["result"],
+        "result_json": parsed["result_json"],
+        "last_executed_task": parsed["last_executed_task"],
+        "status_response": status_response,
+    }
 
 
 @mcp.tool()

@@ -39,6 +39,9 @@ Set `PUBLIC_BASE_URL` in production, for example `https://mcp-dh2a.onrender.com`
 - `analyze_text`: returns basic text statistics and top terms.
 - `run_crewai_automation`: sends an order to a configured CrewAI deployment.
 - `call_crewai_endpoint`: calls safe GET/POST paths on the configured CrewAI deployment API.
+- `run_crewai_workflow`: starts the configured CrewAI workflow with `{"inputs": {...}}`.
+- `get_crewai_status`: polls `GET /status/{kickoff_id}`.
+- `get_crewai_result`: reads final output from the status response.
 
 ## Docker
 
@@ -110,3 +113,8 @@ After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
 
 - `run_crewai_automation`: starts the configured CrewAI deployment via `/kickoff`.
 - `call_crewai_endpoint`: makes constrained GET/POST calls to the CrewAI deployment API.
+- `run_crewai_workflow`: sends `POST /kickoff` with nested inputs, such as `{"inputs": {"user_name": "Jean"}}`.
+- `get_crewai_status`: checks run state with `GET /status/{kickoff_id}`.
+- `get_crewai_result`: returns the final result from `GET /status/{kickoff_id}`.
+
+CrewAI status is the source of truth for output. This deployment returns final output in the `/status/{kickoff_id}` payload; `/output/{kickoff_id}` is not used.
