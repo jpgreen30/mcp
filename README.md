@@ -40,8 +40,10 @@ Set `PUBLIC_BASE_URL` in production, for example `https://mcp-dh2a.onrender.com`
 - `run_crewai_automation`: sends an order to a configured CrewAI deployment.
 - `call_crewai_endpoint`: calls safe GET/POST paths on the configured CrewAI deployment API.
 - `run_crewai_workflow`: starts the configured CrewAI workflow with `{"inputs": {...}}`.
+- `run_crewai_workflow_and_wait`: starts a CrewAI workflow, polls until completion, and returns the finished report.
 - `get_crewai_status`: polls `GET /status/{kickoff_id}`.
 - `get_crewai_result`: reads final output from the status response.
+- `get_crewai_workflow_result`: fetches a completed workflow result later by `workflow_id` and `kickoff_id`.
 
 ## Docker
 
@@ -132,10 +134,12 @@ After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
 - `run_crewai_automation`: starts the configured CrewAI deployment via `/kickoff`.
 - `call_crewai_endpoint`: makes constrained GET/POST calls to a CrewAI deployment API. Pass `workflow_id` to inspect non-default routes.
 - `run_crewai_workflow`: sends `POST /kickoff` with nested inputs, such as `{"inputs": {"user_name": "Jean"}}`.
+- `run_crewai_workflow_and_wait`: sends `POST /kickoff`, polls result endpoints, and returns the final JSON plus markdown report.
 - `get_crewai_status`: checks run state with `GET /status/{kickoff_id}`.
 - `get_crewai_result`: returns the final result from `GET /status/{kickoff_id}`.
+- `get_crewai_workflow_result`: fetches final output later using the workflow route.
 
-CrewAI status is the source of truth for output. This deployment returns final output in the `/status/{kickoff_id}` payload; `/output/{kickoff_id}` is not used.
+CrewAI status is the source of truth for output. This deployment returns final output in the `/status/{kickoff_id}` payload. The gateway also probes `/result/{kickoff_id}`, `/kickoff/{kickoff_id}`, `/runs/{kickoff_id}`, and `/tasks/{kickoff_id}` as fallbacks.
 
 Life insurance lead workflow input example:
 
@@ -156,7 +160,7 @@ run_crewai_workflow(
 Life insurance research workflow input example:
 
 ```python
-run_crewai_workflow(
+run_crewai_workflow_and_wait(
     workflow_id="life_insurance_research",
     inputs={
         "user_name": "Jean Pierre",
@@ -170,6 +174,8 @@ run_crewai_workflow(
         "followup_channel": "Brevo",
         "output_format": "markdown_and_json",
     },
+    timeout_seconds=180,
+    poll_interval_seconds=5,
 )
 ```
 

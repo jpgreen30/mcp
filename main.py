@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import asyncio
+import json
 from collections import Counter
 from html import unescape
 from time import time
@@ -29,11 +31,12 @@ CREWAI_DEFAULT_PAYLOAD_FIELDS = {
     "trainingFilename": "",
     "generateArtifact": False,
 }
-CREWAI_WORKFLOWS = {
+SUPPORTED_WORKFLOWS = {
     "default": {
         "api_url_env": "CREWAI_API_URL",
         "token_env": "CREWAI_BEARER_TOKEN",
         "required_inputs": [],
+        "result_polling_supported": True,
     },
     "life_insurance_leads": {
         "api_url_env": "CREWAI_LIFE_INSURANCE_API_URL",
@@ -48,6 +51,7 @@ CREWAI_WORKFLOWS = {
             "crm_destination",
             "followup_channel",
         ],
+        "result_polling_supported": True,
     },
     "life_insurance_research": {
         "api_url_env": "CREWAI_LIFE_INSURANCE_RESEARCH_API_URL",
@@ -67,8 +71,36 @@ CREWAI_WORKFLOWS = {
             "followup_channel",
             "output_format",
         ],
+        "result_polling_supported": True,
     },
 }
+for _workflow_name in (
+    "life_insurance_content",
+    "life_insurance_seo",
+    "life_insurance_competitor",
+    "life_insurance_compliance",
+    "life_insurance_email",
+    "life_insurance_retell",
+    "life_insurance_crm",
+    "life_insurance_analytics",
+):
+    SUPPORTED_WORKFLOWS[_workflow_name] = {
+        "api_url_env": f"CREWAI_{_workflow_name.upper()}_API_URL",
+        "token_env": f"CREWAI_{_workflow_name.upper()}_BEARER_TOKEN",
+        "fallback_api_url_env": "CREWAI_API_URL",
+        "fallback_token_env": "CREWAI_BEARER_TOKEN",
+        "required_inputs": [],
+        "result_polling_supported": True,
+    }
+
+CREWAI_WORKFLOWS = SUPPORTED_WORKFLOWS
+CREWAI_RESULT_ENDPOINTS = (
+    "/status/{kickoff_id}",
+    "/result/{kickoff_id}",
+    "/kickoff/{kickoff_id}",
+    "/runs/{kickoff_id}",
+    "/tasks/{kickoff_id}",
+)
 _auth_codes: dict[str, dict[str, Any]] = {}
 
 
@@ -432,9 +464,32 @@ def _crewai_route_debug() -> dict[str, dict[str, Any]]:
             "token_configured": bool(token),
             "token_env": workflow["token_env"],
             "required_inputs": workflow["required_inputs"],
+            "result_polling_supported": workflow.get("result_polling_supported", False),
+            "result_endpoints": list(CREWAI_RESULT_ENDPOINTS),
         }
 
     return routes
+
+
+def _public_crewai_route_debug() -> dict[str, Any]:
+    routes = _crewai_route_debug()
+    default_route = routes.get("default", {})
+    workflows = {
+        workflow_id: {
+            "url": route["api_url"],
+            "token_configured": route["token_configured"],
+            "result_polling_supported": route["result_polling_supported"],
+            "required_inputs": route["required_inputs"],
+            "result_endpoints": route["result_endpoints"],
+        }
+        for workflow_id, route in routes.items()
+        if workflow_id != "default"
+    }
+    return {
+        "health": True,
+        "default": default_route.get("api_url"),
+        "workflows": workflows,
+    }
 
 
 def _validate_workflow_inputs(workflow_id: str, inputs: dict[str, Any]) -> None:
@@ -529,6 +584,100 @@ def _extract_status_result(status_response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_state(value: Any) -> str:
+    state = str(value or "").strip().lower()
+    if state in {"success", "successful", "completed", "complete", "done"}:
+        return "completed"
+    if state in {"failed", "failure", "error", "errored", "timed_out", "timeout"}:
+        return "failed"
+    if state in {"pending", "queued", "running", "in_progress", "started"}:
+        return "running"
+    return state or "unknown"
+
+
+def _extract_json_from_markdown(markdown: str) -> Any | None:
+    fenced_matches = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", markdown, flags=re.DOTALL | re.IGNORECASE)
+    for match in fenced_matches:
+        try:
+            return json.loads(match)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _format_workflow_result(
+    *,
+    workflow_id: str,
+    kickoff_id: str,
+    endpoint: str | None,
+    status_response: dict[str, Any],
+) -> dict[str, Any]:
+    parsed = _extract_status_result(status_response)
+    state = _normalize_state(parsed.get("state") or parsed.get("status"))
+    result = parsed.get("result")
+    result_json = parsed.get("result_json")
+    markdown_report = result if isinstance(result, str) else None
+
+    if result_json is None and isinstance(result, dict):
+        result_json = result
+    if result_json is None and markdown_report:
+        result_json = _extract_json_from_markdown(markdown_report)
+
+    return {
+        "ok": status_response.get("ok", False) and state != "failed",
+        "workflow_id": workflow_id,
+        "kickoff_id": kickoff_id,
+        "status": state,
+        "result_endpoint": endpoint,
+        "result": result_json if result_json is not None else result,
+        "markdown_report": markdown_report,
+        "raw_result": result,
+        "status_response": status_response,
+    }
+
+
+async def _get_crewai_workflow_result_response(
+    workflow_id: str,
+    kickoff_id: str,
+) -> dict[str, Any]:
+    last_response: dict[str, Any] | None = None
+
+    for endpoint_template in CREWAI_RESULT_ENDPOINTS:
+        endpoint = endpoint_template.format(kickoff_id=kickoff_id)
+        response = await _crewai_request("GET", endpoint, workflow_id=workflow_id)
+        last_response = response
+        if not response["ok"]:
+            if response["status_code"] in {404, 405}:
+                continue
+            return _format_workflow_result(
+                workflow_id=workflow_id,
+                kickoff_id=kickoff_id,
+                endpoint=endpoint,
+                status_response=response,
+            )
+
+        formatted = _format_workflow_result(
+            workflow_id=workflow_id,
+            kickoff_id=kickoff_id,
+            endpoint=endpoint,
+            status_response=response,
+        )
+        if formatted["status"] != "unknown" or formatted["result"] is not None:
+            return formatted
+
+    return {
+        "ok": False,
+        "workflow_id": workflow_id,
+        "kickoff_id": kickoff_id,
+        "status": "failed",
+        "result_endpoint": None,
+        "result": None,
+        "markdown_report": None,
+        "error": "No supported CrewAI result endpoint returned a usable response.",
+        "last_response": last_response,
+    }
+
+
 @mcp.tool()
 async def run_crewai_automation(
     instructions: str = Field(
@@ -590,6 +739,69 @@ async def run_crewai_workflow(
 
 
 @mcp.tool()
+async def run_crewai_workflow_and_wait(
+    inputs: dict[str, Any] = Field(
+        description="CrewAI inputs payload, for example {'user_name': 'Jean'}.",
+    ),
+    workflow_id: str = Field(
+        default="default",
+        min_length=1,
+        max_length=100,
+        description="Logical CrewAI workflow id, such as 'life_insurance_research'.",
+    ),
+    timeout_seconds: int = Field(default=180, ge=10, le=600),
+    poll_interval_seconds: int = Field(default=5, ge=2, le=30),
+) -> dict[str, Any]:
+    """Start a CrewAI workflow, poll for completion, and return the final result."""
+    kickoff_result = await run_crewai_workflow(inputs=inputs, workflow_id=workflow_id)
+    kickoff_id = kickoff_result.get("kickoff_id")
+    if not kickoff_result.get("ok") or not kickoff_id:
+        return {
+            "ok": False,
+            "workflow_id": workflow_id,
+            "kickoff_id": kickoff_id,
+            "status": "failed",
+            "error": "CrewAI workflow kickoff failed.",
+            "kickoff": kickoff_result,
+        }
+
+    deadline = time() + timeout_seconds
+    last_result: dict[str, Any] | None = None
+    while time() < deadline:
+        last_result = await _get_crewai_workflow_result_response(workflow_id, kickoff_id)
+        if last_result["status"] == "completed" and last_result.get("result") is not None:
+            return {
+                "ok": True,
+                "workflow_id": workflow_id,
+                "kickoff_id": kickoff_id,
+                "status": "completed",
+                "result_endpoint": last_result.get("result_endpoint"),
+                "result": last_result.get("result"),
+                "markdown_report": last_result.get("markdown_report"),
+                "raw_result": last_result.get("raw_result"),
+            }
+        if last_result["status"] == "failed":
+            return {
+                "ok": False,
+                "workflow_id": workflow_id,
+                "kickoff_id": kickoff_id,
+                "status": "failed",
+                "error": last_result.get("error") or last_result.get("raw_result") or last_result.get("status_response"),
+                "result_endpoint": last_result.get("result_endpoint"),
+            }
+        await asyncio.sleep(poll_interval_seconds)
+
+    return {
+        "ok": False,
+        "workflow_id": workflow_id,
+        "kickoff_id": kickoff_id,
+        "status": "timeout",
+        "message": "Workflow started but result was not ready before timeout.",
+        "last_result": last_result,
+    }
+
+
+@mcp.tool()
 async def get_crewai_status(
     kickoff_id: str = Field(min_length=1, max_length=100),
     workflow_id: str = Field(default="default", min_length=1, max_length=100),
@@ -619,6 +831,15 @@ async def get_crewai_result(
 
 
 @mcp.tool()
+async def get_crewai_workflow_result(
+    kickoff_id: str = Field(min_length=1, max_length=100),
+    workflow_id: str = Field(default="default", min_length=1, max_length=100),
+) -> dict[str, Any]:
+    """Fetch a CrewAI workflow result from the configured workflow route."""
+    return await _get_crewai_workflow_result_response(workflow_id, kickoff_id)
+
+
+@mcp.tool()
 async def call_crewai_endpoint(
     method: str = Field(pattern="^(GET|POST)$"),
     path: str = Field(
@@ -645,7 +866,9 @@ async def call_crewai_endpoint(
 
 @mcp.custom_route("/debug/routes", methods=["GET"], include_in_schema=False)
 async def debug_routes(request: Request) -> Response:
-    return JSONResponse({"ok": True, "routes": _crewai_route_debug()})
+    debug = _public_crewai_route_debug()
+    debug["routes"] = _crewai_route_debug()
+    return JSONResponse(debug)
 
 
 app = mcp.http_app(path="/mcp", transport="streamable-http")
