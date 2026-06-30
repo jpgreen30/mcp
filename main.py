@@ -410,6 +410,33 @@ def _crewai_config(workflow_id: str = "default") -> tuple[str, str]:
     return api_url, token
 
 
+def _crewai_route_debug() -> dict[str, dict[str, Any]]:
+    routes: dict[str, dict[str, Any]] = {}
+
+    for workflow_id, workflow in CREWAI_WORKFLOWS.items():
+        api_url = os.getenv(workflow["api_url_env"], "").rstrip("/")
+        token = os.getenv(workflow["token_env"], "")
+        source = "primary"
+
+        if not api_url and workflow.get("fallback_api_url_env"):
+            api_url = os.getenv(str(workflow["fallback_api_url_env"]), "").rstrip("/")
+            source = "fallback"
+        if not token and workflow.get("fallback_token_env"):
+            token = os.getenv(str(workflow["fallback_token_env"]), "")
+
+        routes[workflow_id] = {
+            "api_url": api_url or None,
+            "api_url_env": workflow["api_url_env"],
+            "fallback_api_url_env": workflow.get("fallback_api_url_env"),
+            "source": source if api_url else None,
+            "token_configured": bool(token),
+            "token_env": workflow["token_env"],
+            "required_inputs": workflow["required_inputs"],
+        }
+
+    return routes
+
+
 def _validate_workflow_inputs(workflow_id: str, inputs: dict[str, Any]) -> None:
     workflow = CREWAI_WORKFLOWS.get(workflow_id)
     if workflow is None:
@@ -600,6 +627,12 @@ async def call_crewai_endpoint(
         description="CrewAI deployment API path, such as /kickoff or /inputs.",
     ),
     json_body: dict[str, Any] | None = None,
+    workflow_id: str = Field(
+        default="default",
+        min_length=1,
+        max_length=100,
+        description="Logical CrewAI workflow id used to select the deployment route.",
+    ),
 ) -> dict[str, Any]:
     """Call a safe GET or POST path on the configured CrewAI deployment API."""
     if not path.startswith("/"):
@@ -607,7 +640,12 @@ async def call_crewai_endpoint(
     blocked_fragments = {"..", "reset", "delete", "settings"}
     if any(fragment in path.lower() for fragment in blocked_fragments):
         raise ValueError("This CrewAI endpoint path is blocked by the MCP gateway")
-    return await _crewai_request(method, path, json_body=json_body)
+    return await _crewai_request(method, path, json_body=json_body, workflow_id=workflow_id)
+
+
+@mcp.custom_route("/debug/routes", methods=["GET"], include_in_schema=False)
+async def debug_routes(request: Request) -> Response:
+    return JSONResponse({"ok": True, "routes": _crewai_route_debug()})
 
 
 app = mcp.http_app(path="/mcp", transport="streamable-http")

@@ -130,7 +130,7 @@ If those override variables are not set, `life_insurance_research` uses `CREWAI_
 After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
 
 - `run_crewai_automation`: starts the configured CrewAI deployment via `/kickoff`.
-- `call_crewai_endpoint`: makes constrained GET/POST calls to the CrewAI deployment API.
+- `call_crewai_endpoint`: makes constrained GET/POST calls to a CrewAI deployment API. Pass `workflow_id` to inspect non-default routes.
 - `run_crewai_workflow`: sends `POST /kickoff` with nested inputs, such as `{"inputs": {"user_name": "Jean"}}`.
 - `get_crewai_status`: checks run state with `GET /status/{kickoff_id}`.
 - `get_crewai_result`: returns the final result from `GET /status/{kickoff_id}`.
@@ -174,3 +174,21 @@ run_crewai_workflow(
 ```
 
 The gateway adds `workflow_id="life_insurance_research"` into the nested CrewAI inputs payload when the MCP workflow parameter is used.
+
+Route debug endpoint:
+
+```bash
+curl https://mcp-dh2a.onrender.com/debug/routes
+```
+
+This returns configured CrewAI API URLs and token presence flags without exposing bearer token values.
+
+To inspect the life insurance research deployment inputs through MCP, call:
+
+```python
+call_crewai_endpoint(
+    method="GET",
+    path="/inputs",
+    workflow_id="life_insurance_research",
+)
+```
