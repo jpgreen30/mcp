@@ -29,6 +29,27 @@ CREWAI_DEFAULT_PAYLOAD_FIELDS = {
     "trainingFilename": "",
     "generateArtifact": False,
 }
+CREWAI_WORKFLOWS = {
+    "default": {
+        "api_url_env": "CREWAI_API_URL",
+        "token_env": "CREWAI_BEARER_TOKEN",
+        "required_inputs": [],
+    },
+    "life_insurance_leads": {
+        "api_url_env": "CREWAI_LIFE_INSURANCE_API_URL",
+        "token_env": "CREWAI_LIFE_INSURANCE_BEARER_TOKEN",
+        "fallback_api_url_env": "CREWAI_API_URL",
+        "fallback_token_env": "CREWAI_BEARER_TOKEN",
+        "required_inputs": [
+            "client_name",
+            "target_audience",
+            "licensed_states",
+            "offer",
+            "crm_destination",
+            "followup_channel",
+        ],
+    },
+}
 _auth_codes: dict[str, dict[str, Any]] = {}
 
 
@@ -350,12 +371,40 @@ async def analyze_text(
     }
 
 
-def _crewai_config() -> tuple[str, str]:
-    api_url = os.getenv("CREWAI_API_URL", "").rstrip("/")
-    token = os.getenv("CREWAI_BEARER_TOKEN", "")
+def _crewai_config(workflow_id: str = "default") -> tuple[str, str]:
+    workflow = CREWAI_WORKFLOWS.get(workflow_id)
+    if workflow is None:
+        supported = ", ".join(sorted(CREWAI_WORKFLOWS))
+        raise ValueError(f"Unsupported workflow_id '{workflow_id}'. Supported: {supported}")
+
+    api_url = os.getenv(workflow["api_url_env"], "").rstrip("/")
+    token = os.getenv(workflow["token_env"], "")
+    if not api_url and workflow.get("fallback_api_url_env"):
+        api_url = os.getenv(str(workflow["fallback_api_url_env"]), "").rstrip("/")
+    if not token and workflow.get("fallback_token_env"):
+        token = os.getenv(str(workflow["fallback_token_env"]), "")
+
     if not api_url or not token:
-        raise ValueError("CREWAI_API_URL and CREWAI_BEARER_TOKEN must be configured")
+        raise ValueError(
+            f"CrewAI API URL and bearer token must be configured for workflow_id '{workflow_id}'"
+        )
     return api_url, token
+
+
+def _validate_workflow_inputs(workflow_id: str, inputs: dict[str, Any]) -> None:
+    workflow = CREWAI_WORKFLOWS.get(workflow_id)
+    if workflow is None:
+        supported = ", ".join(sorted(CREWAI_WORKFLOWS))
+        raise ValueError(f"Unsupported workflow_id '{workflow_id}'. Supported: {supported}")
+
+    missing = [key for key in workflow["required_inputs"] if key not in inputs]
+    if missing:
+        raise ValueError(f"Missing required inputs for {workflow_id}: {', '.join(missing)}")
+
+    if workflow_id == "life_insurance_leads":
+        licensed_states = inputs.get("licensed_states")
+        if not isinstance(licensed_states, list) or not licensed_states:
+            raise ValueError("licensed_states must be a non-empty list")
 
 
 async def _crewai_request(
@@ -364,8 +413,9 @@ async def _crewai_request(
     *,
     json_body: dict[str, Any] | None = None,
     timeout_seconds: float = 120.0,
+    workflow_id: str = "default",
 ) -> dict[str, Any]:
-    api_url, token = _crewai_config()
+    api_url, token = _crewai_config(workflow_id)
     normalized_path = "/" + path.lstrip("/")
     headers = {
         "Authorization": f"Bearer {token}",
@@ -457,15 +507,19 @@ async def run_crewai_workflow(
         default="default",
         min_length=1,
         max_length=100,
-        description="Logical CrewAI workflow id. The current deployment supports 'default'.",
+        description="Logical CrewAI workflow id, such as 'default' or 'life_insurance_leads'.",
     ),
 ) -> dict[str, Any]:
     """Run a CrewAI workflow using POST /kickoff with {'inputs': {...}}."""
-    if workflow_id != "default":
-        raise ValueError("Only workflow_id='default' is configured for this gateway")
+    _validate_workflow_inputs(workflow_id, inputs)
 
-    input_spec = await _crewai_request("GET", "/inputs")
-    kickoff = await _crewai_request("POST", "/kickoff", json_body={"inputs": inputs})
+    input_spec = await _crewai_request("GET", "/inputs", workflow_id=workflow_id)
+    kickoff = await _crewai_request(
+        "POST",
+        "/kickoff",
+        json_body={"inputs": inputs},
+        workflow_id=workflow_id,
+    )
     kickoff_id = _extract_kickoff_id(kickoff)
 
     return {
@@ -480,17 +534,19 @@ async def run_crewai_workflow(
 @mcp.tool()
 async def get_crewai_status(
     kickoff_id: str = Field(min_length=1, max_length=100),
+    workflow_id: str = Field(default="default", min_length=1, max_length=100),
 ) -> dict[str, Any]:
     """Get CrewAI workflow status from GET /status/{kickoff_id}."""
-    return await _crewai_request("GET", f"/status/{kickoff_id}")
+    return await _crewai_request("GET", f"/status/{kickoff_id}", workflow_id=workflow_id)
 
 
 @mcp.tool()
 async def get_crewai_result(
     kickoff_id: str = Field(min_length=1, max_length=100),
+    workflow_id: str = Field(default="default", min_length=1, max_length=100),
 ) -> dict[str, Any]:
     """Read the final CrewAI result from GET /status/{kickoff_id}."""
-    status_response = await get_crewai_status(kickoff_id)
+    status_response = await get_crewai_status(kickoff_id, workflow_id=workflow_id)
     parsed = _extract_status_result(status_response)
     return {
         "ok": status_response["ok"],

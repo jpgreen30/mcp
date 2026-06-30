@@ -109,6 +109,15 @@ CREWAI_API_URL="https://your-crew-deployment.crewai.com"
 CREWAI_BEARER_TOKEN="your-crewai-deployment-bearer-token"
 ```
 
+Optional per-workflow override for the Life Insurance Lead Crew:
+
+```bash
+CREWAI_LIFE_INSURANCE_API_URL="https://your-life-insurance-crew.crewai.com"
+CREWAI_LIFE_INSURANCE_BEARER_TOKEN="your-life-insurance-crew-token"
+```
+
+If those override variables are not set, `life_insurance_leads` uses `CREWAI_API_URL` and `CREWAI_BEARER_TOKEN`.
+
 After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
 
 - `run_crewai_automation`: starts the configured CrewAI deployment via `/kickoff`.
@@ -118,3 +127,19 @@ After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
 - `get_crewai_result`: returns the final result from `GET /status/{kickoff_id}`.
 
 CrewAI status is the source of truth for output. This deployment returns final output in the `/status/{kickoff_id}` payload; `/output/{kickoff_id}` is not used.
+
+Life insurance lead workflow input example:
+
+```python
+run_crewai_workflow(
+    workflow_id="life_insurance_leads",
+    inputs={
+        "client_name": "MotherlyQuotes",
+        "target_audience": "new and expecting moms",
+        "licensed_states": ["CA"],
+        "offer": "free life insurance quote check",
+        "crm_destination": "HubSpot",
+        "followup_channel": "Brevo",
+    },
+)
+```
