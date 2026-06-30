@@ -49,6 +49,25 @@ CREWAI_WORKFLOWS = {
             "followup_channel",
         ],
     },
+    "life_insurance_research": {
+        "api_url_env": "CREWAI_LIFE_INSURANCE_RESEARCH_API_URL",
+        "token_env": "CREWAI_LIFE_INSURANCE_RESEARCH_BEARER_TOKEN",
+        "fallback_api_url_env": "CREWAI_API_URL",
+        "fallback_token_env": "CREWAI_BEARER_TOKEN",
+        "required_inputs": [
+            "workflow_id",
+            "user_name",
+            "client_name",
+            "target_audience",
+            "licensed_states",
+            "product_focus",
+            "competitors",
+            "offer",
+            "crm_destination",
+            "followup_channel",
+            "output_format",
+        ],
+    },
 }
 _auth_codes: dict[str, dict[str, Any]] = {}
 
@@ -401,10 +420,18 @@ def _validate_workflow_inputs(workflow_id: str, inputs: dict[str, Any]) -> None:
     if missing:
         raise ValueError(f"Missing required inputs for {workflow_id}: {', '.join(missing)}")
 
-    if workflow_id == "life_insurance_leads":
+    if workflow_id in {"life_insurance_leads", "life_insurance_research"}:
         licensed_states = inputs.get("licensed_states")
         if not isinstance(licensed_states, list) or not licensed_states:
             raise ValueError("licensed_states must be a non-empty list")
+
+    if workflow_id == "life_insurance_research":
+        if inputs.get("workflow_id") != workflow_id:
+            raise ValueError("workflow_id input must be 'life_insurance_research'")
+
+        competitors = inputs.get("competitors")
+        if not isinstance(competitors, list) or not competitors:
+            raise ValueError("competitors must be a non-empty list")
 
 
 async def _crewai_request(
@@ -511,13 +538,17 @@ async def run_crewai_workflow(
     ),
 ) -> dict[str, Any]:
     """Run a CrewAI workflow using POST /kickoff with {'inputs': {...}}."""
-    _validate_workflow_inputs(workflow_id, inputs)
+    prepared_inputs = dict(inputs)
+    if workflow_id != "default":
+        prepared_inputs.setdefault("workflow_id", workflow_id)
+
+    _validate_workflow_inputs(workflow_id, prepared_inputs)
 
     input_spec = await _crewai_request("GET", "/inputs", workflow_id=workflow_id)
     kickoff = await _crewai_request(
         "POST",
         "/kickoff",
-        json_body={"inputs": inputs},
+        json_body={"inputs": prepared_inputs},
         workflow_id=workflow_id,
     )
     kickoff_id = _extract_kickoff_id(kickoff)

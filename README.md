@@ -118,6 +118,15 @@ CREWAI_LIFE_INSURANCE_BEARER_TOKEN="your-life-insurance-crew-token"
 
 If those override variables are not set, `life_insurance_leads` uses `CREWAI_API_URL` and `CREWAI_BEARER_TOKEN`.
 
+Optional per-workflow override for the Life Insurance Research Crew:
+
+```bash
+CREWAI_LIFE_INSURANCE_RESEARCH_API_URL="https://your-life-insurance-research-crew.crewai.com"
+CREWAI_LIFE_INSURANCE_RESEARCH_BEARER_TOKEN="your-life-insurance-research-crew-token"
+```
+
+If those override variables are not set, `life_insurance_research` uses `CREWAI_API_URL` and `CREWAI_BEARER_TOKEN`.
+
 After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
 
 - `run_crewai_automation`: starts the configured CrewAI deployment via `/kickoff`.
@@ -143,3 +152,25 @@ run_crewai_workflow(
     },
 )
 ```
+
+Life insurance research workflow input example:
+
+```python
+run_crewai_workflow(
+    workflow_id="life_insurance_research",
+    inputs={
+        "user_name": "Jean Pierre",
+        "client_name": "MotherlyQuotes",
+        "target_audience": "new and expecting moms",
+        "licensed_states": ["CA"],
+        "product_focus": "term life insurance",
+        "competitors": ["Policygenius", "Ethos", "Ladder", "SelectQuote"],
+        "offer": "free life insurance quote check",
+        "crm_destination": "HubSpot",
+        "followup_channel": "Brevo",
+        "output_format": "markdown_and_json",
+    },
+)
+```
+
+The gateway adds `workflow_id="life_insurance_research"` into the nested CrewAI inputs payload when the MCP workflow parameter is used.
