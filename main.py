@@ -6,6 +6,7 @@ import secrets
 import asyncio
 import json
 from collections import Counter
+from datetime import datetime, timezone
 from html import unescape
 from time import time
 from typing import Any
@@ -171,6 +172,7 @@ for _workflow_name in (
 
 CREWAI_WORKFLOWS = SUPPORTED_WORKFLOWS
 LOCAL_WORKFLOW_RUNS: dict[str, dict[str, Any]] = {}
+PING_OS_RUNS: dict[str, dict[str, Any]] = {}
 CREWAI_RESULT_ENDPOINTS = (
     "/status/{kickoff_id}",
     "/result/{kickoff_id}",
@@ -995,6 +997,7 @@ def _email_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
 
 def _compliance_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
     text = _summary_text(inputs["content_to_review"], max_chars=10_000)
+    lower_text = text.lower()
     risky_patterns = [
         ("guaranteed approval", "Do not claim guaranteed approval."),
         ("guaranteed savings", "Do not claim guaranteed savings."),
@@ -1002,11 +1005,19 @@ def _compliance_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
         ("best rate", "Avoid superlative pricing claims unless substantiated and approved."),
         ("no medical exam guaranteed", "Avoid implying underwriting outcomes are guaranteed."),
     ]
-    flagged_claims = [
-        {"claim": pattern, "reason": reason}
-        for pattern, reason in risky_patterns
-        if pattern in text.lower()
-    ]
+    safe_instruction_markers = ("do not", "avoid", "not guaranteed", "no guarantee", "cannot guarantee")
+    flagged_claims = []
+    for pattern, reason in risky_patterns:
+        start = 0
+        while True:
+            index = lower_text.find(pattern, start)
+            if index == -1:
+                break
+            context = lower_text[max(0, index - 80): index + len(pattern) + 80]
+            if not any(marker in context for marker in safe_instruction_markers):
+                flagged_claims.append({"claim": pattern, "reason": reason})
+                break
+            start = index + len(pattern)
     safer_rewrites = [
         {"original": item["claim"], "rewrite": "Explore available options with a licensed follow-up. Eligibility and pricing are not guaranteed."}
         for item in flagged_claims
@@ -1301,6 +1312,238 @@ async def get_crewai_workflow_result(
     return await _get_crewai_workflow_result_response(workflow_id, kickoff_id)
 
 
+PING_OS_SUPPORTED_VERTICALS = ["life_insurance"]
+PING_OS_OBJECTIVE_TEMPLATES = {
+    "lead_generation_campaign": {
+        "keywords": ["generate leads", "acquire qualified leads", "launch campaign", "build funnel", "create campaign package", "campaign package"],
+        "workflows": [
+            "life_insurance_research",
+            "life_insurance_seo",
+            "life_insurance_content",
+            "life_insurance_retell",
+            "life_insurance_email",
+            "life_insurance_compliance",
+        ],
+    },
+    "market_research": {
+        "keywords": ["research market", "find opportunities", "analyze competitors", "identify niches", "market research"],
+        "workflows": ["life_insurance_research", "life_insurance_seo"],
+    },
+    "content_engine": {
+        "keywords": ["create content calendar", "generate ads", "write emails", "create landing page copy", "content engine"],
+        "workflows": ["life_insurance_research", "life_insurance_seo", "life_insurance_content", "life_insurance_email", "life_insurance_compliance"],
+    },
+    "voice_agent_setup": {
+        "keywords": ["build retell script", "create qualification flow", "appointment booking script", "voice agent", "retell"],
+        "workflows": ["life_insurance_research", "life_insurance_retell", "life_insurance_compliance"],
+    },
+    "compliance_review": {
+        "keywords": ["review campaign", "check claims", "rewrite unsafe language", "compliance review", "unsafe language"],
+        "workflows": ["life_insurance_compliance"],
+    },
+}
+PING_OS_WORKFLOW_REASONS = {
+    "life_insurance_research": "Research audience, competitors, buyer intent, objections, and campaign angles.",
+    "life_insurance_seo": "Identify SEO opportunities, keyword clusters, and content gaps.",
+    "life_insurance_content": "Generate compliant ad, landing page, SMS, and campaign copy from research.",
+    "life_insurance_retell": "Create Retell voice qualification, objection, and appointment-booking flows.",
+    "life_insurance_email": "Create Brevo and HubSpot follow-up sequences and segmentation logic.",
+    "life_insurance_compliance": "Review campaign assets for risky claims, missing disclaimers, and safer rewrites.",
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_geography(geography: str | list[str]) -> list[str]:
+    if isinstance(geography, list):
+        return [str(item).strip() for item in geography if str(item).strip()]
+    return [part.strip() for part in str(geography).split(",") if part.strip()]
+
+
+def _detect_ping_os_objective_type(objective: str) -> str:
+    normalized = objective.lower()
+    for objective_type, template in PING_OS_OBJECTIVE_TEMPLATES.items():
+        if any(keyword in normalized for keyword in template["keywords"]):
+            return objective_type
+    return "lead_generation_campaign"
+
+
+def _normalize_ping_os_vertical(vertical: str, objective: str) -> str:
+    normalized = vertical.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"life", "insurance", "lifeinsurance"}:
+        normalized = "life_insurance"
+    if not normalized and "life insurance" in objective.lower():
+        normalized = "life_insurance"
+    if normalized not in PING_OS_SUPPORTED_VERTICALS:
+        supported = ", ".join(PING_OS_SUPPORTED_VERTICALS)
+        raise ValueError(f"Unsupported vertical '{vertical}'. Supported verticals: {supported}")
+    return normalized
+
+
+def _build_ping_os_plan(objective: str, vertical: str) -> tuple[str, list[dict[str, Any]]]:
+    objective_type = _detect_ping_os_objective_type(objective)
+    workflow_ids = PING_OS_OBJECTIVE_TEMPLATES[objective_type]["workflows"]
+    if vertical == "life_insurance":
+        plan = [
+            {
+                "step": index,
+                "workflow_id": workflow_id,
+                "reason": PING_OS_WORKFLOW_REASONS[workflow_id],
+            }
+            for index, workflow_id in enumerate(workflow_ids, start=1)
+        ]
+        return objective_type, plan
+    raise ValueError(f"No supervisor plan is configured for vertical '{vertical}'")
+
+
+def _shared_context(
+    *,
+    objective: str,
+    business_name: str,
+    vertical: str,
+    target_audience: str,
+    geography: list[str],
+    offer: str,
+    constraints: dict[str, Any],
+    output_format: str,
+    prior_outputs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "objective": objective,
+        "business_name": business_name,
+        "vertical": vertical,
+        "target_audience": target_audience,
+        "geography": geography,
+        "offer": offer,
+        "constraints": constraints,
+        "output_format": output_format,
+        "prior_outputs": prior_outputs or {},
+    }
+
+
+def _ping_os_research_summary(prior_outputs: dict[str, Any]) -> Any:
+    for workflow_id in ("life_insurance_research", "life_insurance_seo"):
+        if workflow_id in prior_outputs:
+            output = prior_outputs[workflow_id]
+            if isinstance(output, dict):
+                return output.get("result") or output.get("markdown_report") or output
+            return output
+    return prior_outputs
+
+
+def _ping_os_workflow_inputs(workflow_id: str, context: dict[str, Any]) -> dict[str, Any]:
+    constraints = context["constraints"]
+    business_name = context["business_name"]
+    geography = context["geography"]
+    base = {
+        "workflow_id": workflow_id,
+        "user_name": str(constraints.get("user_name") or "Ping OS"),
+        "client_name": business_name,
+        "target_audience": context["target_audience"],
+        "licensed_states": geography,
+        "product_focus": str(constraints.get("product_focus") or "term life insurance"),
+        "offer": context["offer"],
+        "crm_destination": str(constraints.get("crm_destination") or "HubSpot"),
+        "followup_channel": str(constraints.get("followup_channel") or "Brevo"),
+        "output_format": str(context.get("output_format") or constraints.get("output_format") or "markdown_and_json"),
+    }
+    competitors = _listify(constraints.get("competitors")) or ["Policygenius", "Ethos", "Ladder", "SelectQuote"]
+    research_summary = _ping_os_research_summary(context["prior_outputs"])
+
+    if workflow_id == "life_insurance_research":
+        return {**base, "competitors": competitors}
+    if workflow_id == "life_insurance_seo":
+        return {
+            **base,
+            "research_summary": research_summary or context["objective"],
+            "competitors": competitors,
+        }
+    if workflow_id == "life_insurance_content":
+        return {
+            **base,
+            "research_summary": research_summary or context["objective"],
+            "channels": _listify(constraints.get("channels")) or ["Facebook", "TikTok", "Email", "Landing Page", "SMS"],
+            "tone": str(constraints.get("tone") or "warm, clear, compliant, parent-focused"),
+        }
+    if workflow_id in {"life_insurance_retell", "life_insurance_email"}:
+        return {
+            **base,
+            "research_summary": research_summary or context["objective"],
+        }
+    if workflow_id == "life_insurance_compliance":
+        return {
+            **base,
+            "content_to_review": {
+                "objective": context["objective"],
+                "offer": context["offer"],
+                "prior_outputs": context["prior_outputs"],
+            },
+        }
+    raise ValueError(f"Workflow '{workflow_id}' is not supported by Ping OS")
+
+
+def _ping_os_final_strategy(
+    *,
+    business_name: str,
+    target_audience: str,
+    geography: list[str],
+    offer: str,
+    workflow_results: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "business_name": business_name,
+        "target_audience": target_audience,
+        "geography": geography,
+        "offer": offer,
+        "research": workflow_results.get("life_insurance_research", {}).get("result"),
+        "seo": workflow_results.get("life_insurance_seo", {}).get("result"),
+        "content": workflow_results.get("life_insurance_content", {}).get("result"),
+        "retell": workflow_results.get("life_insurance_retell", {}).get("result"),
+        "email": workflow_results.get("life_insurance_email", {}).get("result"),
+        "compliance": workflow_results.get("life_insurance_compliance", {}).get("result"),
+        "kickoff_ids": {
+            workflow_id: result.get("kickoff_id")
+            for workflow_id, result in workflow_results.items()
+        },
+    }
+
+
+def _ping_os_markdown_report(
+    *,
+    objective: str,
+    business_name: str,
+    vertical: str,
+    objective_type: str,
+    execution_plan: list[dict[str, Any]],
+    workflow_results: dict[str, Any],
+    final_strategy: dict[str, Any],
+) -> str:
+    plan_lines = [
+        f"{step['step']}. `{step['workflow_id']}` - {step['reason']}"
+        for step in execution_plan
+    ]
+    sections = [
+        f"# Ping OS Strategy Package for {business_name}",
+        f"Objective: {objective}\nVertical: {vertical}\nObjective type: {objective_type}",
+        "## Execution Plan\n" + "\n".join(plan_lines),
+    ]
+    for workflow_id, result in workflow_results.items():
+        title = workflow_id.replace("_", " ").title()
+        sections.extend([
+            f"## {title}",
+            result.get("markdown_report") or _summary_text(result.get("result"), 3000),
+        ])
+    compliance = final_strategy.get("compliance") or {}
+    if isinstance(compliance, dict):
+        sections.extend([
+            "## Launch Readiness",
+            f"Compliance status: {compliance.get('approval_status', 'not reviewed')}\nRisk score: {compliance.get('risk_score', 'n/a')}",
+        ])
+    return "\n\n".join(sections)
+
+
 @mcp.tool()
 async def create_life_insurance_campaign_package(
     user_name: str = Field(min_length=1, max_length=200),
@@ -1455,6 +1698,157 @@ async def create_life_insurance_campaign_package(
 
 
 @mcp.tool()
+async def run_ping_os_objective(
+    objective: str = Field(min_length=1, max_length=2000),
+    business_name: str = Field(min_length=1, max_length=200),
+    vertical: str = Field(min_length=1, max_length=100),
+    target_audience: str = Field(min_length=1, max_length=500),
+    geography: str | list[str] = Field(min_length=1),
+    offer: str = Field(min_length=1, max_length=500),
+    constraints: dict[str, Any] = Field(default_factory=dict),
+    output_format: str = Field(default="markdown_and_json", min_length=1, max_length=100),
+    timeout_seconds: int = Field(default=300, ge=60, le=600),
+) -> dict[str, Any]:
+    """Run a Ping OS business objective through the supervisor planner and workflow graph."""
+    normalized_vertical = _normalize_ping_os_vertical(vertical, objective)
+    normalized_geography = _normalize_geography(geography)
+    if not normalized_geography:
+        raise ValueError("geography must include at least one state, region, or market")
+
+    objective_type, execution_plan = _build_ping_os_plan(objective, normalized_vertical)
+    run_id = f"ping-os-{secrets.token_urlsafe(14)}"
+    created_at = _utc_now_iso()
+    run_record: dict[str, Any] = {
+        "run_id": run_id,
+        "objective": objective,
+        "business_name": business_name,
+        "vertical": normalized_vertical,
+        "objective_type": objective_type,
+        "created_at": created_at,
+        "status": "running",
+        "execution_plan": execution_plan,
+        "workflow_ids": [step["workflow_id"] for step in execution_plan],
+        "kickoff_ids": {},
+        "workflow_results": {},
+        "shared_context": _shared_context(
+            objective=objective,
+            business_name=business_name,
+            vertical=normalized_vertical,
+            target_audience=target_audience,
+            geography=normalized_geography,
+            offer=offer,
+            constraints=constraints,
+            output_format=output_format,
+        ),
+        "final_output": {},
+        "markdown_report": "",
+    }
+    PING_OS_RUNS[run_id] = run_record
+
+    prior_outputs: dict[str, Any] = {}
+    workflow_results: dict[str, Any] = {}
+    failed_workflows: list[str] = []
+
+    for step in execution_plan:
+        workflow_id = step["workflow_id"]
+        context = _shared_context(
+            objective=objective,
+            business_name=business_name,
+            vertical=normalized_vertical,
+            target_audience=target_audience,
+            geography=normalized_geography,
+            offer=offer,
+            constraints=constraints,
+            output_format=output_format,
+            prior_outputs=prior_outputs,
+        )
+        workflow_inputs = _ping_os_workflow_inputs(workflow_id, context)
+        result = await run_crewai_workflow_and_wait(
+            workflow_id=workflow_id,
+            inputs=workflow_inputs,
+            timeout_seconds=timeout_seconds if workflow_id == "life_insurance_research" else 60,
+            poll_interval_seconds=5 if workflow_id == "life_insurance_research" else 2,
+        )
+        workflow_results[workflow_id] = result
+        run_record["workflow_results"] = workflow_results
+        run_record["kickoff_ids"][workflow_id] = result.get("kickoff_id")
+
+        if not result.get("ok"):
+            failed_workflows.append(workflow_id)
+            run_record["status"] = "partial_failure"
+            break
+
+        prior_outputs[workflow_id] = {
+            "result": result.get("result"),
+            "markdown_report": result.get("markdown_report"),
+            "kickoff_id": result.get("kickoff_id"),
+        }
+        run_record["shared_context"]["prior_outputs"] = prior_outputs
+
+    final_strategy = _ping_os_final_strategy(
+        business_name=business_name,
+        target_audience=target_audience,
+        geography=normalized_geography,
+        offer=offer,
+        workflow_results=workflow_results,
+    )
+    markdown_report = _ping_os_markdown_report(
+        objective=objective,
+        business_name=business_name,
+        vertical=normalized_vertical,
+        objective_type=objective_type,
+        execution_plan=execution_plan,
+        workflow_results=workflow_results,
+        final_strategy=final_strategy,
+    )
+    run_record.update(
+        {
+            "status": "completed" if not failed_workflows else "partial_failure",
+            "workflow_results": workflow_results,
+            "final_output": final_strategy,
+            "markdown_report": markdown_report,
+            "completed_at": _utc_now_iso(),
+        }
+    )
+    return {
+        "ok": not failed_workflows,
+        "run_id": run_id,
+        "objective": objective,
+        "business_name": business_name,
+        "vertical": normalized_vertical,
+        "objective_type": objective_type,
+        "status": run_record["status"],
+        "execution_plan": execution_plan,
+        "workflow_results": workflow_results,
+        "final_strategy": final_strategy,
+        "markdown_report": markdown_report,
+        "failed_workflows": failed_workflows,
+    }
+
+
+@mcp.tool()
+async def get_ping_os_run(
+    run_id: str = Field(min_length=1, max_length=120),
+) -> dict[str, Any]:
+    """Fetch a stored Ping OS supervisor run record."""
+    run = PING_OS_RUNS.get(run_id)
+    if not run:
+        return {
+            "ok": False,
+            "status": "not_found",
+            "run_id": run_id,
+            "message": "No Ping OS run record exists for this run_id on the current gateway process.",
+        }
+    return {
+        "ok": True,
+        "status": run["status"],
+        "run": run,
+        "final_output": run.get("final_output"),
+        "markdown_report": run.get("markdown_report"),
+    }
+
+
+@mcp.tool()
 async def call_crewai_endpoint(
     method: str = Field(pattern="^(GET|POST)$"),
     path: str = Field(
@@ -1484,6 +1878,32 @@ async def debug_routes(request: Request) -> Response:
     debug = _public_crewai_route_debug()
     debug["routes"] = _crewai_route_debug()
     return JSONResponse(debug)
+
+
+@mcp.custom_route("/debug/ping-os", methods=["GET"], include_in_schema=False)
+async def debug_ping_os(request: Request) -> Response:
+    available = [
+        workflow_id
+        for workflow_id in (
+            "life_insurance_research",
+            "life_insurance_seo",
+            "life_insurance_content",
+            "life_insurance_retell",
+            "life_insurance_email",
+            "life_insurance_compliance",
+        )
+        if workflow_id in CREWAI_WORKFLOWS
+    ]
+    return JSONResponse(
+        {
+            "health": True,
+            "supervisor_enabled": True,
+            "supported_verticals": PING_OS_SUPPORTED_VERTICALS,
+            "supported_objective_types": list(PING_OS_OBJECTIVE_TEMPLATES),
+            "available_workflows": available,
+            "run_count": len(PING_OS_RUNS),
+        }
+    )
 
 
 app = mcp.http_app(path="/mcp", transport="streamable-http")

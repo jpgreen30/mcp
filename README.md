@@ -45,6 +45,8 @@ Set `PUBLIC_BASE_URL` in production, for example `https://mcp-dh2a.onrender.com`
 - `get_crewai_result`: reads final output from the status response.
 - `get_crewai_workflow_result`: fetches a completed workflow result later by `workflow_id` and `kickoff_id`.
 - `create_life_insurance_campaign_package`: runs the Life Insurance Marketing OS sequence and returns one combined compliant campaign package.
+- `run_ping_os_objective`: lets ChatGPT give Ping OS a business objective; the supervisor plans and runs the needed workflows.
+- `get_ping_os_run`: fetches a stored Ping OS supervisor run by `run_id`.
 
 ## Docker
 
@@ -150,6 +152,8 @@ After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
 - `get_crewai_result`: returns the final result from `GET /status/{kickoff_id}`.
 - `get_crewai_workflow_result`: fetches final output later using the workflow route.
 - `create_life_insurance_campaign_package`: creates a full MotherlyQuotes-style campaign package by chaining research, content, Retell, email, and compliance workflows.
+- `run_ping_os_objective`: accepts a plain-English business objective, selects a plan, runs workflows, and returns one strategy package.
+- `get_ping_os_run`: retrieves the stored supervisor run record, final JSON, and markdown report.
 
 CrewAI status is the source of truth for output. This deployment returns final output in the `/status/{kickoff_id}` payload. The gateway also probes `/result/{kickoff_id}`, `/kickoff/{kickoff_id}`, `/runs/{kickoff_id}`, and `/tasks/{kickoff_id}` as fallbacks.
 
@@ -201,6 +205,14 @@ curl https://mcp-dh2a.onrender.com/debug/routes
 
 This returns configured CrewAI API URLs and token presence flags without exposing bearer token values.
 
+Ping OS supervisor debug endpoint:
+
+```bash
+curl https://mcp-dh2a.onrender.com/debug/ping-os
+```
+
+This returns supervisor health, supported verticals, supported objective types, available workflows, and current in-process run count.
+
 To inspect the life insurance research deployment inputs through MCP, call:
 
 ```python
@@ -227,3 +239,91 @@ create_life_insurance_campaign_package(
     timeout_seconds=300,
 )
 ```
+
+## Ping OS Supervisor
+
+Ping OS is the supervisor/orchestrator layer for ChatGPT. Instead of calling workflow tools manually, ChatGPT can submit a business objective and let Ping OS choose the workflow graph.
+
+Supported verticals:
+
+- `life_insurance`
+
+Supported objective types:
+
+- `lead_generation_campaign`
+- `market_research`
+- `content_engine`
+- `voice_agent_setup`
+- `compliance_review`
+
+The default life insurance lead-generation plan runs:
+
+1. `life_insurance_research`
+2. `life_insurance_seo`
+3. `life_insurance_content`
+4. `life_insurance_retell`
+5. `life_insurance_email`
+6. `life_insurance_compliance`
+
+ChatGPT should call the supervisor like this:
+
+```python
+run_ping_os_objective(
+    objective="Generate a compliant campaign package to acquire 500 qualified life insurance leads in California this month.",
+    business_name="MotherlyQuotes",
+    vertical="life_insurance",
+    target_audience="new and expecting moms",
+    geography=["CA"],
+    offer="free life insurance quote check",
+    constraints={
+        "product_focus": "term life insurance",
+        "crm_destination": "HubSpot",
+        "followup_channel": "Brevo",
+        "competitors": ["Policygenius", "Ethos", "Ladder", "SelectQuote"],
+    },
+    output_format="markdown_and_json",
+    timeout_seconds=300,
+)
+```
+
+The response includes:
+
+```json
+{
+  "ok": true,
+  "run_id": "ping-os-...",
+  "objective": "...",
+  "business_name": "MotherlyQuotes",
+  "vertical": "life_insurance",
+  "execution_plan": [
+    {
+      "step": 1,
+      "workflow_id": "life_insurance_research",
+      "reason": "Research audience, competitors, buyer intent, objections, and campaign angles."
+    }
+  ],
+  "workflow_results": {},
+  "final_strategy": {},
+  "markdown_report": ""
+}
+```
+
+Fetch a stored run later:
+
+```python
+get_ping_os_run(run_id="ping-os-...")
+```
+
+Run records are stored in the MCP Gateway process memory and include:
+
+- `run_id`
+- `objective`
+- `business_name`
+- `vertical`
+- `created_at`
+- `status`
+- `execution_plan`
+- `workflow_ids`
+- `kickoff_ids`
+- `final_output`
+- `markdown_report`
