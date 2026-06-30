@@ -44,6 +44,7 @@ Set `PUBLIC_BASE_URL` in production, for example `https://mcp-dh2a.onrender.com`
 - `get_crewai_status`: polls `GET /status/{kickoff_id}`.
 - `get_crewai_result`: reads final output from the status response.
 - `get_crewai_workflow_result`: fetches a completed workflow result later by `workflow_id` and `kickoff_id`.
+- `create_life_insurance_campaign_package`: runs the Life Insurance Marketing OS sequence and returns one combined compliant campaign package.
 
 ## Docker
 
@@ -129,6 +130,16 @@ CREWAI_LIFE_INSURANCE_RESEARCH_BEARER_TOKEN="your-life-insurance-research-crew-t
 
 If those override variables are not set, `life_insurance_research` uses `CREWAI_API_URL` and `CREWAI_BEARER_TOKEN`.
 
+The downstream Life Insurance Marketing OS workflows are available through the same MCP tools:
+
+- `life_insurance_content`
+- `life_insurance_seo`
+- `life_insurance_retell`
+- `life_insurance_email`
+- `life_insurance_compliance`
+
+These currently run as MCP Gateway workflow handlers, so they do not need separate CrewAI Cloud deployments. Dedicated CrewAI deployments can be added later by setting each workflow's env vars and replacing the local handler.
+
 After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
 
 - `run_crewai_automation`: starts the configured CrewAI deployment via `/kickoff`.
@@ -138,6 +149,7 @@ After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
 - `get_crewai_status`: checks run state with `GET /status/{kickoff_id}`.
 - `get_crewai_result`: returns the final result from `GET /status/{kickoff_id}`.
 - `get_crewai_workflow_result`: fetches final output later using the workflow route.
+- `create_life_insurance_campaign_package`: creates a full MotherlyQuotes-style campaign package by chaining research, content, Retell, email, and compliance workflows.
 
 CrewAI status is the source of truth for output. This deployment returns final output in the `/status/{kickoff_id}` payload. The gateway also probes `/result/{kickoff_id}`, `/kickoff/{kickoff_id}`, `/runs/{kickoff_id}`, and `/tasks/{kickoff_id}` as fallbacks.
 
@@ -196,5 +208,22 @@ call_crewai_endpoint(
     method="GET",
     path="/inputs",
     workflow_id="life_insurance_research",
+)
+```
+
+Full campaign package example:
+
+```python
+create_life_insurance_campaign_package(
+    user_name="Jean Pierre",
+    client_name="MotherlyQuotes",
+    target_audience="new and expecting moms",
+    licensed_states=["CA"],
+    product_focus="term life insurance",
+    competitors=["Policygenius", "Ethos", "Ladder", "SelectQuote"],
+    offer="free life insurance quote check",
+    crm_destination="HubSpot",
+    followup_channel="Brevo",
+    timeout_seconds=300,
 )
 ```

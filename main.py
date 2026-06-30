@@ -73,14 +73,90 @@ SUPPORTED_WORKFLOWS = {
         ],
         "result_polling_supported": True,
     },
+    "life_insurance_content": {
+        "local_handler": "life_insurance_content",
+        "required_inputs": [
+            "workflow_id",
+            "user_name",
+            "client_name",
+            "target_audience",
+            "licensed_states",
+            "product_focus",
+            "research_summary",
+            "offer",
+            "channels",
+            "tone",
+            "output_format",
+        ],
+        "result_polling_supported": True,
+    },
+    "life_insurance_seo": {
+        "local_handler": "life_insurance_seo",
+        "required_inputs": [
+            "workflow_id",
+            "user_name",
+            "client_name",
+            "target_audience",
+            "licensed_states",
+            "product_focus",
+            "research_summary",
+            "competitors",
+            "output_format",
+        ],
+        "result_polling_supported": True,
+    },
+    "life_insurance_retell": {
+        "local_handler": "life_insurance_retell",
+        "required_inputs": [
+            "workflow_id",
+            "user_name",
+            "client_name",
+            "target_audience",
+            "licensed_states",
+            "product_focus",
+            "research_summary",
+            "offer",
+            "crm_destination",
+            "followup_channel",
+            "output_format",
+        ],
+        "result_polling_supported": True,
+    },
+    "life_insurance_email": {
+        "local_handler": "life_insurance_email",
+        "required_inputs": [
+            "workflow_id",
+            "user_name",
+            "client_name",
+            "target_audience",
+            "licensed_states",
+            "product_focus",
+            "research_summary",
+            "offer",
+            "crm_destination",
+            "followup_channel",
+            "output_format",
+        ],
+        "result_polling_supported": True,
+    },
+    "life_insurance_compliance": {
+        "local_handler": "life_insurance_compliance",
+        "required_inputs": [
+            "workflow_id",
+            "user_name",
+            "client_name",
+            "target_audience",
+            "licensed_states",
+            "product_focus",
+            "content_to_review",
+            "offer",
+            "output_format",
+        ],
+        "result_polling_supported": True,
+    },
 }
 for _workflow_name in (
-    "life_insurance_content",
-    "life_insurance_seo",
     "life_insurance_competitor",
-    "life_insurance_compliance",
-    "life_insurance_email",
-    "life_insurance_retell",
     "life_insurance_crm",
     "life_insurance_analytics",
 ):
@@ -94,6 +170,7 @@ for _workflow_name in (
     }
 
 CREWAI_WORKFLOWS = SUPPORTED_WORKFLOWS
+LOCAL_WORKFLOW_RUNS: dict[str, dict[str, Any]] = {}
 CREWAI_RESULT_ENDPOINTS = (
     "/status/{kickoff_id}",
     "/result/{kickoff_id}",
@@ -427,6 +504,8 @@ def _crewai_config(workflow_id: str = "default") -> tuple[str, str]:
     if workflow is None:
         supported = ", ".join(sorted(CREWAI_WORKFLOWS))
         raise ValueError(f"Unsupported workflow_id '{workflow_id}'. Supported: {supported}")
+    if workflow.get("local_handler"):
+        raise ValueError(f"workflow_id '{workflow_id}' is handled locally by the MCP gateway")
 
     api_url = os.getenv(workflow["api_url_env"], "").rstrip("/")
     token = os.getenv(workflow["token_env"], "")
@@ -446,6 +525,20 @@ def _crewai_route_debug() -> dict[str, dict[str, Any]]:
     routes: dict[str, dict[str, Any]] = {}
 
     for workflow_id, workflow in CREWAI_WORKFLOWS.items():
+        if workflow.get("local_handler"):
+            routes[workflow_id] = {
+                "api_url": None,
+                "api_url_env": None,
+                "fallback_api_url_env": None,
+                "source": "local",
+                "token_configured": True,
+                "token_env": None,
+                "required_inputs": workflow["required_inputs"],
+                "result_polling_supported": workflow.get("result_polling_supported", False),
+                "result_endpoints": ["local://workflow-runs/{kickoff_id}"],
+            }
+            continue
+
         api_url = os.getenv(workflow["api_url_env"], "").rstrip("/")
         token = os.getenv(workflow["token_env"], "")
         source = "primary"
@@ -507,10 +600,16 @@ def _validate_workflow_inputs(workflow_id: str, inputs: dict[str, Any]) -> None:
         if not isinstance(licensed_states, list) or not licensed_states:
             raise ValueError("licensed_states must be a non-empty list")
 
-    if workflow_id == "life_insurance_research":
-        if inputs.get("workflow_id") != workflow_id:
-            raise ValueError("workflow_id input must be 'life_insurance_research'")
+    if workflow_id.startswith("life_insurance_") and "licensed_states" in workflow["required_inputs"]:
+        licensed_states = inputs.get("licensed_states")
+        if not isinstance(licensed_states, list) or not licensed_states:
+            raise ValueError("licensed_states must be a non-empty list")
 
+    if workflow_id.startswith("life_insurance_"):
+        if inputs.get("workflow_id") != workflow_id:
+            raise ValueError(f"workflow_id input must be '{workflow_id}'")
+
+    if workflow_id in {"life_insurance_research", "life_insurance_seo"}:
         competitors = inputs.get("competitors")
         if not isinstance(competitors, list) or not competitors:
             raise ValueError("competitors must be a non-empty list")
@@ -636,6 +735,336 @@ def _format_workflow_result(
     }
 
 
+def _states_text(states: Any) -> str:
+    if isinstance(states, list):
+        return ", ".join(str(state) for state in states)
+    return str(states or "")
+
+
+def _listify(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return []
+
+
+def _summary_text(value: Any, max_chars: int = 1600) -> str:
+    if isinstance(value, str):
+        return _limit_text(value, max_chars)
+    return _limit_text(json.dumps(value, ensure_ascii=False), max_chars)
+
+
+def _markdown_section(title: str, items: list[str]) -> str:
+    lines = [f"## {title}"]
+    lines.extend(f"- {item}" for item in items)
+    return "\n".join(lines)
+
+
+def _campaign_safety_notes(states: Any) -> list[str]:
+    states_text = _states_text(states)
+    return [
+        "Do not state or imply guaranteed approval, guaranteed savings, guaranteed premiums, or guaranteed coverage.",
+        "Keep copy educational and lead-generation focused; route product-specific advice to a licensed professional.",
+        f"Limit active campaign targeting to licensed states only: {states_text}.",
+        "Use terms like 'explore options', 'request a quote check', and 'learn what may fit your family' instead of promises.",
+    ]
+
+
+def _content_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
+    client = inputs["client_name"]
+    audience = inputs["target_audience"]
+    product = inputs["product_focus"]
+    offer = inputs["offer"]
+    tone = inputs["tone"]
+    channels = _listify(inputs["channels"]) or ["Facebook", "TikTok", "Email", "Landing page", "SMS"]
+    states = inputs["licensed_states"]
+    summary = _summary_text(inputs["research_summary"])
+
+    facebook_ads = [
+        {
+            "primary_text": f"New or expecting a child? {client} can help you explore {product} options with a {offer}.",
+            "headline": "Protect what matters most",
+            "cta": "Request quote check",
+            "compliance_note": "Avoid claims about guaranteed coverage or savings.",
+        },
+        {
+            "primary_text": f"Life insurance can feel complicated. {client} makes the first step simpler for {audience}.",
+            "headline": "A simpler first step",
+            "cta": "Start free check",
+            "compliance_note": "Position as education and quote exploration only.",
+        },
+    ]
+    tiktok_scripts = [
+        {
+            "hook": "Three life insurance questions new parents should ask before the baby arrives.",
+            "beats": [
+                "Name the emotional moment: growing family, new responsibilities.",
+                f"Explain the {offer} as a no-pressure starting point.",
+                "Invite viewers to compare options with a licensed follow-up.",
+            ],
+            "cta": "Tap to request your free quote check.",
+        }
+    ]
+    email_sequence = [
+        {"day": 0, "subject": "Your free life insurance quote check", "body": f"Thanks for reaching out to {client}. Here is what to expect next: a simple review of options available in {_states_text(states)}."},
+        {"day": 2, "subject": "What new parents often overlook", "body": f"Many {audience} compare {product} after a major family milestone. Here are questions to bring to a licensed advisor."},
+        {"day": 5, "subject": "Ready to compare options?", "body": f"Your {offer} is still available. No guarantees, just a clear next step to explore coverage options."},
+    ]
+    landing_page_copy = {
+        "hero_headline": f"Life insurance quote checks for {audience}",
+        "subheadline": f"Explore {product} options in {_states_text(states)} with a simple, educational first step.",
+        "form_cta": "Get my free quote check",
+        "trust_copy": "Licensed follow-up. Clear information. No pressure.",
+        "faq": [
+            "Will this guarantee coverage? No. Eligibility and pricing depend on carrier and underwriting review.",
+            "Is this financial advice? No. This is lead-generation and educational content only.",
+        ],
+    }
+    sms_followups = [
+        f"Hi from {client}. Your {offer} request is ready. Reply YES to choose a time to review options.",
+        "Quick reminder: your quote check is educational and does not guarantee coverage or pricing. Want help comparing next steps?",
+    ]
+    compliance_notes = _campaign_safety_notes(states)
+    markdown_report = "\n\n".join([
+        f"# Compliant Content Package for {client}",
+        f"Tone: {tone}\nChannels: {', '.join(channels)}\n\nResearch basis: {summary}",
+        _markdown_section("Facebook Ads", [ad["headline"] + ": " + ad["primary_text"] for ad in facebook_ads]),
+        _markdown_section("TikTok Scripts", [tiktok_scripts[0]["hook"]]),
+        _markdown_section("Compliance Notes", compliance_notes),
+    ])
+    return {
+        "facebook_ads": facebook_ads,
+        "tiktok_scripts": tiktok_scripts,
+        "email_sequence": email_sequence,
+        "landing_page_copy": landing_page_copy,
+        "sms_followups": sms_followups,
+        "compliance_notes": compliance_notes,
+        "markdown_report": markdown_report,
+    }
+
+
+def _seo_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
+    client = inputs["client_name"]
+    audience = inputs["target_audience"]
+    product = inputs["product_focus"]
+    states = inputs["licensed_states"]
+    competitors = _listify(inputs["competitors"])
+    state_slug = _states_text(states)
+    keyword_clusters = [
+        {"cluster": "new parent life insurance", "keywords": ["life insurance for new parents", "term life insurance for moms", "life insurance after having a baby"]},
+        {"cluster": "California quote intent", "keywords": ["term life insurance quotes California", "life insurance quote check CA", "affordable term life insurance California"]},
+        {"cluster": "education and objections", "keywords": ["how much life insurance do parents need", "life insurance myths for moms", "term vs whole life for parents"]},
+    ]
+    blog_topics = [
+        f"Life insurance questions {audience} should ask before comparing quotes",
+        f"How {product} works for growing families in {state_slug}",
+        "What a quote check can and cannot tell you",
+    ]
+    landing_page_topics = [
+        f"{product.title()} quote check for {audience}",
+        f"Life insurance education hub for California parents",
+    ]
+    local_seo_opportunities = [
+        f"Build localized pages for licensed state(s): {state_slug}.",
+        "Add local FAQ schema around quote process, licensed follow-up, and no-guarantee disclaimers.",
+    ]
+    competitor_seo_gaps = [
+        f"{competitor}: create parent-specific comparison content that avoids product-performance claims."
+        for competitor in competitors
+    ]
+    content_calendar = [
+        {"week": 1, "asset": blog_topics[0], "goal": "Capture educational search intent"},
+        {"week": 2, "asset": landing_page_topics[0], "goal": "Convert quote-check traffic"},
+        {"week": 3, "asset": blog_topics[1], "goal": "Support local SEO"},
+        {"week": 4, "asset": blog_topics[2], "goal": "Reduce objections"},
+    ]
+    markdown_report = "\n\n".join([
+        f"# SEO Opportunity Plan for {client}",
+        _markdown_section("Keyword Clusters", [cluster["cluster"] for cluster in keyword_clusters]),
+        _markdown_section("Blog Topics", blog_topics),
+        _markdown_section("Competitor SEO Gaps", competitor_seo_gaps),
+    ])
+    return {
+        "keyword_clusters": keyword_clusters,
+        "blog_topics": blog_topics,
+        "landing_page_topics": landing_page_topics,
+        "local_seo_opportunities": local_seo_opportunities,
+        "competitor_seo_gaps": competitor_seo_gaps,
+        "content_calendar": content_calendar,
+        "markdown_report": markdown_report,
+    }
+
+
+def _retell_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
+    client = inputs["client_name"]
+    audience = inputs["target_audience"]
+    product = inputs["product_focus"]
+    offer = inputs["offer"]
+    states = inputs["licensed_states"]
+    opening_script = f"Hi, this is the {client} assistant. I’m following up about your {offer}. I can ask a few basic questions to help route you to a licensed person for {product} options in {_states_text(states)}."
+    qualification_questions = [
+        "Are you currently located in one of our licensed states?",
+        "Are you exploring coverage for yourself, a spouse or partner, or family protection planning?",
+        "Are you interested in term coverage, or are you still comparing product types?",
+        "What is the best time for a licensed follow-up?",
+    ]
+    objection_responses = {
+        "too_expensive": "That is a common concern. I cannot quote or guarantee pricing, but a licensed follow-up can help you compare available options.",
+        "already_have_policy": "That is helpful. This can still be a quote check to compare whether your current setup still fits your family goals.",
+        "not_ready": "No problem. I can send educational information and schedule a later follow-up.",
+    }
+    appointment_booking_flow = [
+        "Confirm licensed state.",
+        "Confirm preferred contact method.",
+        "Offer two appointment windows.",
+        "Send confirmation to CRM and follow-up channel.",
+    ]
+    compliance_disclaimers = _campaign_safety_notes(states)
+    handoff_rules = [
+        "Transfer or create task for licensed agent when user asks for coverage recommendation.",
+        "Stop qualification if user asks for legal, tax, financial, or underwriting advice.",
+        "Flag urgent complaints or cancellation requests for human review.",
+    ]
+    crm_fields_to_capture = ["first_name", "last_name", "phone", "email", "state", "coverage_interest", "preferred_callback_time", "consent_to_contact"]
+    markdown_report = "\n\n".join([
+        f"# Retell Voice Agent Script for {client}",
+        opening_script,
+        _markdown_section("Qualification Questions", qualification_questions),
+        _markdown_section("Compliance Disclaimers", compliance_disclaimers),
+    ])
+    return {
+        "opening_script": opening_script,
+        "qualification_questions": qualification_questions,
+        "objection_responses": objection_responses,
+        "appointment_booking_flow": appointment_booking_flow,
+        "compliance_disclaimers": compliance_disclaimers,
+        "handoff_rules": handoff_rules,
+        "crm_fields_to_capture": crm_fields_to_capture,
+        "markdown_report": markdown_report,
+    }
+
+
+def _email_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
+    client = inputs["client_name"]
+    audience = inputs["target_audience"]
+    offer = inputs["offer"]
+    crm = inputs["crm_destination"]
+    followup = inputs["followup_channel"]
+    sequence = [
+        {"day": 0, "subject": "Your quote check request", "body": f"Thanks for requesting a {offer} from {client}. Here is what happens next."},
+        {"day": 1, "subject": "A simple first step for new parents", "body": f"Many {audience} start with a quote check to understand available options."},
+        {"day": 2, "subject": "Common life insurance questions", "body": "Here are educational questions to ask before comparing options."},
+        {"day": 3, "subject": "What affects eligibility and pricing?", "body": "Carrier review and underwriting can affect eligibility and pricing; no outcomes are guaranteed."},
+        {"day": 5, "subject": "Want help reviewing options?", "body": "A licensed follow-up can answer product-specific questions."},
+        {"day": 7, "subject": "Still interested in your free check?", "body": "Your request is still open if you want to continue."},
+        {"day": 10, "subject": "Final reminder: compare options clearly", "body": "Use your quote check as an educational next step, not a coverage guarantee."},
+    ]
+    subject_lines = [item["subject"] for item in sequence]
+    sms_followups = [
+        f"{client}: Your {offer} request is ready. Reply YES for a licensed follow-up.",
+        f"{client}: Reminder - no coverage or savings are guaranteed. Want to compare next steps?",
+    ]
+    segmentation_rules = [
+        "Segment by licensed state before routing.",
+        "Segment by parent/newborn interest for family-protection messaging.",
+        "Suppress users without consent to contact.",
+    ]
+    nurture_logic = [
+        f"Create lifecycle stage in {crm}: New Quote Check Lead.",
+        f"Use {followup} for short reminder touches only after consent.",
+        "Escalate product-specific replies to licensed agent.",
+    ]
+    compliance_notes = _campaign_safety_notes(inputs["licensed_states"])
+    markdown_report = "\n\n".join([
+        f"# Follow-Up Campaign for {client}",
+        _markdown_section("Subject Lines", subject_lines),
+        _markdown_section("Segmentation Rules", segmentation_rules),
+        _markdown_section("Compliance Notes", compliance_notes),
+    ])
+    return {
+        "7_day_email_sequence": sequence,
+        "subject_lines": subject_lines,
+        "sms_followups": sms_followups,
+        "segmentation_rules": segmentation_rules,
+        "nurture_logic": nurture_logic,
+        "compliance_notes": compliance_notes,
+        "markdown_report": markdown_report,
+    }
+
+
+def _compliance_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
+    text = _summary_text(inputs["content_to_review"], max_chars=10_000)
+    risky_patterns = [
+        ("guaranteed approval", "Do not claim guaranteed approval."),
+        ("guaranteed savings", "Do not claim guaranteed savings."),
+        ("guaranteed coverage", "Do not claim guaranteed coverage."),
+        ("best rate", "Avoid superlative pricing claims unless substantiated and approved."),
+        ("no medical exam guaranteed", "Avoid implying underwriting outcomes are guaranteed."),
+    ]
+    flagged_claims = [
+        {"claim": pattern, "reason": reason}
+        for pattern, reason in risky_patterns
+        if pattern in text.lower()
+    ]
+    safer_rewrites = [
+        {"original": item["claim"], "rewrite": "Explore available options with a licensed follow-up. Eligibility and pricing are not guaranteed."}
+        for item in flagged_claims
+    ]
+    missing_disclaimers = []
+    if "not guaranteed" not in text.lower() and "no guarantee" not in text.lower():
+        missing_disclaimers.append("Add a clear disclaimer that coverage, pricing, and savings are not guaranteed.")
+    if "licensed" not in text.lower():
+        missing_disclaimers.append("Clarify that product-specific questions should be handled by a licensed professional.")
+    state_specific_notes = [
+        f"Use campaigns only in licensed states: {_states_text(inputs['licensed_states'])}.",
+        "Confirm state-specific advertising requirements before launch.",
+    ]
+    risk_score = min(100, 20 + len(flagged_claims) * 20 + len(missing_disclaimers) * 10)
+    approval_status = "approved_with_notes" if risk_score < 50 else "needs_revision"
+    markdown_report = "\n\n".join([
+        "# Compliance Review",
+        f"Risk score: {risk_score}\nApproval status: {approval_status}",
+        _markdown_section("Flagged Claims", [item["claim"] for item in flagged_claims] or ["No high-risk guarantee claims detected."]),
+        _markdown_section("Missing Disclaimers", missing_disclaimers or ["Core disclaimers present or not required from reviewed text."]),
+    ])
+    return {
+        "risk_score": risk_score,
+        "flagged_claims": flagged_claims,
+        "safer_rewrites": safer_rewrites,
+        "missing_disclaimers": missing_disclaimers,
+        "state_specific_notes": state_specific_notes,
+        "approval_status": approval_status,
+        "markdown_report": markdown_report,
+    }
+
+
+LOCAL_WORKFLOW_HANDLERS = {
+    "life_insurance_content": _content_workflow,
+    "life_insurance_seo": _seo_workflow,
+    "life_insurance_retell": _retell_workflow,
+    "life_insurance_email": _email_workflow,
+    "life_insurance_compliance": _compliance_workflow,
+}
+
+
+def _run_local_workflow(workflow_id: str, inputs: dict[str, Any]) -> dict[str, Any]:
+    handler = LOCAL_WORKFLOW_HANDLERS[workflow_id]
+    result = handler(inputs)
+    kickoff_id = f"local-{workflow_id}-{secrets.token_urlsafe(12)}"
+    run = {
+        "ok": True,
+        "workflow_id": workflow_id,
+        "kickoff_id": kickoff_id,
+        "status": "completed",
+        "result_endpoint": "local://workflow-runs/{kickoff_id}",
+        "result": result,
+        "markdown_report": result.get("markdown_report"),
+    }
+    LOCAL_WORKFLOW_RUNS[kickoff_id] = run
+    return run
+
+
 async def _get_crewai_workflow_result_response(
     workflow_id: str,
     kickoff_id: str,
@@ -720,6 +1149,24 @@ async def run_crewai_workflow(
 
     _validate_workflow_inputs(workflow_id, prepared_inputs)
 
+    if CREWAI_WORKFLOWS[workflow_id].get("local_handler"):
+        run = _run_local_workflow(workflow_id, prepared_inputs)
+        return {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "kickoff_id": run["kickoff_id"],
+            "input_spec": {"inputs": CREWAI_WORKFLOWS[workflow_id]["required_inputs"]},
+            "kickoff": {
+                "ok": True,
+                "status_code": 200,
+                "url": run["result_endpoint"],
+                "data": {
+                    "kickoff_id": run["kickoff_id"],
+                    "status": "completed",
+                },
+            },
+        }
+
     input_spec = await _crewai_request("GET", "/inputs", workflow_id=workflow_id)
     kickoff = await _crewai_request(
         "POST",
@@ -763,6 +1210,19 @@ async def run_crewai_workflow_and_wait(
             "status": "failed",
             "error": "CrewAI workflow kickoff failed.",
             "kickoff": kickoff_result,
+        }
+
+    if kickoff_id in LOCAL_WORKFLOW_RUNS:
+        run = LOCAL_WORKFLOW_RUNS[kickoff_id]
+        return {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "kickoff_id": kickoff_id,
+            "status": "completed",
+            "result_endpoint": run["result_endpoint"],
+            "result": run["result"],
+            "markdown_report": run["markdown_report"],
+            "raw_result": run["result"],
         }
 
     deadline = time() + timeout_seconds
@@ -836,7 +1296,162 @@ async def get_crewai_workflow_result(
     workflow_id: str = Field(default="default", min_length=1, max_length=100),
 ) -> dict[str, Any]:
     """Fetch a CrewAI workflow result from the configured workflow route."""
+    if kickoff_id in LOCAL_WORKFLOW_RUNS:
+        return LOCAL_WORKFLOW_RUNS[kickoff_id]
     return await _get_crewai_workflow_result_response(workflow_id, kickoff_id)
+
+
+@mcp.tool()
+async def create_life_insurance_campaign_package(
+    user_name: str = Field(min_length=1, max_length=200),
+    client_name: str = Field(min_length=1, max_length=200),
+    target_audience: str = Field(min_length=1, max_length=500),
+    licensed_states: list[str] = Field(min_length=1),
+    product_focus: str = Field(default="term life insurance", min_length=1, max_length=300),
+    competitors: list[str] = Field(default_factory=lambda: ["Policygenius", "Ethos", "Ladder", "SelectQuote"]),
+    offer: str = Field(default="free life insurance quote check", min_length=1, max_length=500),
+    crm_destination: str = Field(default="HubSpot", min_length=1, max_length=200),
+    followup_channel: str = Field(default="Brevo", min_length=1, max_length=200),
+    channels: list[str] = Field(default_factory=lambda: ["Facebook", "TikTok", "Email", "Landing Page", "SMS"]),
+    tone: str = Field(default="warm, clear, compliant, parent-focused", min_length=1, max_length=300),
+    output_format: str = Field(default="markdown_and_json", min_length=1, max_length=100),
+    timeout_seconds: int = Field(default=300, ge=60, le=600),
+) -> dict[str, Any]:
+    """Create a full compliant life insurance campaign package from research through compliance review."""
+    research_inputs = {
+        "workflow_id": "life_insurance_research",
+        "user_name": user_name,
+        "client_name": client_name,
+        "target_audience": target_audience,
+        "licensed_states": licensed_states,
+        "product_focus": product_focus,
+        "competitors": competitors,
+        "offer": offer,
+        "crm_destination": crm_destination,
+        "followup_channel": followup_channel,
+        "output_format": output_format,
+    }
+    research = await run_crewai_workflow_and_wait(
+        inputs=research_inputs,
+        workflow_id="life_insurance_research",
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=5,
+    )
+    if not research.get("ok"):
+        return {
+            "ok": False,
+            "status": "failed",
+            "failed_workflow": "life_insurance_research",
+            "research": research,
+        }
+
+    research_summary = research.get("result") or research.get("markdown_report") or research.get("raw_result")
+    shared = {
+        "user_name": user_name,
+        "client_name": client_name,
+        "target_audience": target_audience,
+        "licensed_states": licensed_states,
+        "product_focus": product_focus,
+        "research_summary": research_summary,
+        "offer": offer,
+        "crm_destination": crm_destination,
+        "followup_channel": followup_channel,
+        "output_format": output_format,
+    }
+
+    content = await run_crewai_workflow_and_wait(
+        workflow_id="life_insurance_content",
+        inputs={
+            **shared,
+            "workflow_id": "life_insurance_content",
+            "channels": channels,
+            "tone": tone,
+        },
+        timeout_seconds=60,
+        poll_interval_seconds=2,
+    )
+    retell = await run_crewai_workflow_and_wait(
+        workflow_id="life_insurance_retell",
+        inputs={**shared, "workflow_id": "life_insurance_retell"},
+        timeout_seconds=60,
+        poll_interval_seconds=2,
+    )
+    email = await run_crewai_workflow_and_wait(
+        workflow_id="life_insurance_email",
+        inputs={**shared, "workflow_id": "life_insurance_email"},
+        timeout_seconds=60,
+        poll_interval_seconds=2,
+    )
+
+    content_to_review = {
+        "research": research.get("result"),
+        "content": content.get("result"),
+        "retell": retell.get("result"),
+        "email": email.get("result"),
+    }
+    compliance = await run_crewai_workflow_and_wait(
+        workflow_id="life_insurance_compliance",
+        inputs={
+            "workflow_id": "life_insurance_compliance",
+            "user_name": user_name,
+            "client_name": client_name,
+            "target_audience": target_audience,
+            "licensed_states": licensed_states,
+            "product_focus": product_focus,
+            "content_to_review": content_to_review,
+            "offer": offer,
+            "output_format": output_format,
+        },
+        timeout_seconds=60,
+        poll_interval_seconds=2,
+    )
+
+    workflow_results = {
+        "life_insurance_research": research,
+        "life_insurance_content": content,
+        "life_insurance_retell": retell,
+        "life_insurance_email": email,
+        "life_insurance_compliance": compliance,
+    }
+    failed = [name for name, result in workflow_results.items() if not result.get("ok")]
+    structured = {
+        "client_name": client_name,
+        "target_audience": target_audience,
+        "licensed_states": licensed_states,
+        "product_focus": product_focus,
+        "offer": offer,
+        "research": research.get("result"),
+        "content": content.get("result"),
+        "retell": retell.get("result"),
+        "email": email.get("result"),
+        "compliance": compliance.get("result"),
+        "kickoff_ids": {
+            name: result.get("kickoff_id")
+            for name, result in workflow_results.items()
+        },
+    }
+    markdown_parts = [
+        f"# AI Marketing Campaign Package for {client_name}",
+        f"Audience: {target_audience}\nLicensed states: {_states_text(licensed_states)}\nOffer: {offer}",
+        "## Research",
+        research.get("markdown_report") or _summary_text(research.get("result"), 3000),
+        "## Content",
+        content.get("markdown_report") or _summary_text(content.get("result"), 3000),
+        "## Retell Voice Agent",
+        retell.get("markdown_report") or _summary_text(retell.get("result"), 3000),
+        "## Email and SMS Follow-Up",
+        email.get("markdown_report") or _summary_text(email.get("result"), 3000),
+        "## Compliance Review",
+        compliance.get("markdown_report") or _summary_text(compliance.get("result"), 3000),
+    ]
+    return {
+        "ok": not failed,
+        "status": "completed" if not failed else "partial_failure",
+        "failed_workflows": failed,
+        "workflow_results": workflow_results,
+        "result": structured,
+        "markdown_report": "\n\n".join(markdown_parts),
+    }
 
 
 @mcp.tool()
