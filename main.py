@@ -1005,7 +1005,15 @@ def _compliance_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
         ("best rate", "Avoid superlative pricing claims unless substantiated and approved."),
         ("no medical exam guaranteed", "Avoid implying underwriting outcomes are guaranteed."),
     ]
-    safe_instruction_markers = ("do not", "avoid", "not guaranteed", "no guarantee", "cannot guarantee")
+    safe_instruction_markers = (
+        "do not",
+        "avoid",
+        "not guaranteed",
+        "no guarantee",
+        "no-guarantee",
+        "no guaranteed",
+        "cannot guarantee",
+    )
     flagged_claims = []
     for pattern, reason in risky_patterns:
         start = 0
@@ -1013,7 +1021,7 @@ def _compliance_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
             index = lower_text.find(pattern, start)
             if index == -1:
                 break
-            context = lower_text[max(0, index - 80): index + len(pattern) + 80]
+            context = lower_text[max(0, index - 180): index + len(pattern) + 180]
             if not any(marker in context for marker in safe_instruction_markers):
                 flagged_claims.append({"claim": pattern, "reason": reason})
                 break
@@ -1327,7 +1335,7 @@ PING_OS_OBJECTIVE_TEMPLATES = {
     },
     "market_research": {
         "keywords": ["research market", "find opportunities", "analyze competitors", "identify niches", "market research"],
-        "workflows": ["life_insurance_research", "life_insurance_seo"],
+        "workflows": ["life_insurance_research"],
     },
     "content_engine": {
         "keywords": ["create content calendar", "generate ads", "write emails", "create landing page copy", "content engine"],
@@ -1340,6 +1348,14 @@ PING_OS_OBJECTIVE_TEMPLATES = {
     "compliance_review": {
         "keywords": ["review campaign", "check claims", "rewrite unsafe language", "compliance review", "unsafe language"],
         "workflows": ["life_insurance_compliance"],
+    },
+    "seo_strategy": {
+        "keywords": ["seo", "keyword", "blog", "search"],
+        "workflows": ["life_insurance_research", "life_insurance_seo"],
+    },
+    "email_nurture": {
+        "keywords": ["email", "sms", "nurture", "follow up", "follow-up"],
+        "workflows": ["life_insurance_email", "life_insurance_compliance"],
     },
 }
 PING_OS_WORKFLOW_REASONS = {
@@ -1542,6 +1558,380 @@ def _ping_os_markdown_report(
             f"Compliance status: {compliance.get('approval_status', 'not reviewed')}\nRisk score: {compliance.get('risk_score', 'n/a')}",
         ])
     return "\n\n".join(sections)
+
+
+def _ping_os_debug_payload() -> dict[str, Any]:
+    available = [
+        workflow_id
+        for workflow_id in (
+            "life_insurance_research",
+            "life_insurance_seo",
+            "life_insurance_content",
+            "life_insurance_retell",
+            "life_insurance_email",
+            "life_insurance_compliance",
+        )
+        if workflow_id in CREWAI_WORKFLOWS
+    ]
+    return {
+        "ok": True,
+        "health": True,
+        "supervisor_enabled": True,
+        "visible_tool_strategy": "single_tool",
+        "supported_verticals": PING_OS_SUPPORTED_VERTICALS,
+        "supported_objective_types": list(PING_OS_OBJECTIVE_TEMPLATES),
+        "available_workflows": available,
+        "run_count": len(PING_OS_RUNS),
+    }
+
+
+def _detect_run_ping_os_objective_type(objective: str, vertical: str) -> str:
+    if vertical != "life_insurance":
+        return _detect_ping_os_objective_type(objective)
+    normalized = objective.lower()
+    checks = [
+        ("lead_generation_campaign", ("lead", "campaign", "funnel", "qualified", "acquire", "launch")),
+        ("market_research", ("research", "market", "competitor", "opportunity")),
+        ("content_engine", ("content", "ads", "facebook", "tiktok", "landing page")),
+        ("voice_agent_setup", ("retell", "voice", "call", "qualification")),
+        ("compliance_review", ("compliance", "review", "claim", "safe")),
+        ("seo_strategy", ("seo", "keyword", "blog", "search")),
+        ("email_nurture", ("email", "sms", "nurture", "follow up", "follow-up")),
+    ]
+    for objective_type, keywords in checks:
+        if any(keyword in normalized for keyword in keywords):
+            return objective_type
+    return "lead_generation_campaign"
+
+
+def _run_ping_os_plan(objective_type: str, context: dict[str, Any]) -> list[dict[str, Any]]:
+    workflows = list(PING_OS_OBJECTIVE_TEMPLATES[objective_type]["workflows"])
+    prior_outputs = context.get("prior_outputs", {})
+    constraints = context["constraints"]
+    if objective_type in {"content_engine", "seo_strategy"} and constraints.get("research_summary"):
+        workflows = [workflow_id for workflow_id in workflows if workflow_id != "life_insurance_research"]
+    return [
+        {
+            "step": index,
+            "workflow_id": workflow_id,
+            "reason": PING_OS_WORKFLOW_REASONS[workflow_id],
+        }
+        for index, workflow_id in enumerate(workflows, start=1)
+        if workflow_id not in prior_outputs
+    ]
+
+
+def _run_ping_os_compliance_summary(final_strategy: dict[str, Any]) -> dict[str, Any]:
+    compliance = final_strategy.get("compliance")
+    if not isinstance(compliance, dict):
+        return {
+            "status": "not_reviewed",
+            "risk_score": None,
+            "flags": [],
+        }
+    return {
+        "status": compliance.get("approval_status", "not_reviewed"),
+        "risk_score": compliance.get("risk_score"),
+        "flags": compliance.get("flagged_claims", []),
+    }
+
+
+def _run_ping_os_failure_report(
+    *,
+    objective: str,
+    business_name: str,
+    vertical: str,
+    objective_type: str | None,
+    execution_plan: list[dict[str, Any]],
+    workflow_results: dict[str, Any],
+    error: str,
+) -> str:
+    return "\n\n".join([
+        f"# Ping OS Run Failed for {business_name}",
+        f"Objective: {objective}\nVertical: {vertical}\nObjective type: {objective_type or 'unknown'}",
+        "## Execution Plan\n" + "\n".join(
+            f"{step['step']}. `{step['workflow_id']}` - {step['reason']}"
+            for step in execution_plan
+        ),
+        f"## Error\n{error}",
+        "## Partial Results\n" + _summary_text(workflow_results, 4000),
+    ])
+
+
+@mcp.tool()
+async def run_ping_os(
+    objective: str = Field(min_length=1, max_length=2000),
+    business_name: str = Field(default="MotherlyQuotes", min_length=1, max_length=200),
+    vertical: str = Field(default="life_insurance", min_length=1, max_length=100),
+    target_audience: str = Field(default="new and expecting moms", min_length=1, max_length=500),
+    geography: list[str] = Field(default_factory=lambda: ["CA"]),
+    offer: str = Field(default="free life insurance quote check", min_length=1, max_length=500),
+    context: dict[str, Any] = Field(default_factory=dict),
+) -> dict[str, Any]:
+    """Stable Ping OS command interface for ChatGPT. Routes objectives internally."""
+    start_time = time()
+    if not isinstance(context, dict):
+        context = {}
+    if not isinstance(business_name, str):
+        business_name = "MotherlyQuotes"
+    if not isinstance(target_audience, str):
+        target_audience = "new and expecting moms"
+    if not isinstance(offer, str):
+        offer = "free life insurance quote check"
+    if not isinstance(geography, list):
+        geography = ["CA"]
+    action = str(context.get("action", "")).lower()
+    if objective.lower().startswith("debug") or action == "debug":
+        return _ping_os_debug_payload()
+
+    if objective.lower().startswith("get_run") or action == "get_run":
+        run_id = str(context.get("run_id") or "").strip()
+        if not run_id:
+            return {
+                "ok": False,
+                "status": "failed",
+                "error": "context.run_id is required when action is get_run",
+                "partial_results": {},
+                "markdown_report": "# Ping OS Run Lookup Failed\n\nMissing `run_id`.",
+            }
+        run = PING_OS_RUNS.get(run_id)
+        if not run:
+            return {
+                "ok": False,
+                "run_id": run_id,
+                "status": "failed",
+                "error": "Run record not found on the current gateway process.",
+                "partial_results": {},
+                "markdown_report": "# Ping OS Run Not Found\n\nThe run may have been created before a service restart or on another process.",
+            }
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "status": run["status"],
+            "run": run,
+            "final_strategy": run.get("final_output"),
+            "markdown_report": run.get("markdown_report"),
+            "debug": {
+                "duration_seconds": round(time() - start_time, 3),
+                "kickoff_ids": {
+                    workflow_id: result.get("kickoff_id")
+                    for workflow_id, result in run.get("workflow_results", {}).items()
+                },
+                "routing_notes": ["Retrieved stored in-memory Ping OS run."],
+            },
+        }
+
+    run_id = f"ping-os-{secrets.token_urlsafe(14)}"
+    normalized_vertical = ""
+    objective_type = None
+    execution_plan: list[dict[str, Any]] = []
+    workflow_results: dict[str, Any] = {}
+    markdown_report = ""
+    constraints = {
+        "product_focus": "term life insurance",
+        "competitors": ["Policygenius", "Ethos", "Ladder", "SelectQuote"],
+        "crm_destination": "HubSpot",
+        "followup_channel": "Brevo",
+        "licensed_states": ["CA"],
+        "output_format": "markdown_and_json",
+        "timeout_seconds": 300,
+        "priority": "normal",
+        **context,
+    }
+    timeout_seconds = int(constraints.get("timeout_seconds") or 300)
+    normalized_geography = _normalize_geography(
+        constraints.get("licensed_states") or geography or ["CA"]
+    )
+    now = _utc_now_iso()
+    run_record: dict[str, Any] = {
+        "run_id": run_id,
+        "created_at": now,
+        "updated_at": now,
+        "objective": objective,
+        "business_name": business_name,
+        "vertical": vertical,
+        "objective_type": None,
+        "inputs": {
+            "objective": objective,
+            "business_name": business_name,
+            "vertical": vertical,
+            "target_audience": target_audience,
+            "geography": normalized_geography,
+            "offer": offer,
+            "context": constraints,
+        },
+        "execution_plan": [],
+        "workflow_results": {},
+        "final_output": {},
+        "markdown_report": "",
+        "status": "running",
+    }
+    PING_OS_RUNS[run_id] = run_record
+
+    try:
+        normalized_vertical = _normalize_ping_os_vertical(vertical, objective)
+        objective_type = _detect_run_ping_os_objective_type(objective, normalized_vertical)
+        shared = _shared_context(
+            objective=objective,
+            business_name=business_name,
+            vertical=normalized_vertical,
+            target_audience=target_audience,
+            geography=normalized_geography,
+            offer=offer,
+            constraints=constraints,
+            output_format=str(constraints.get("output_format") or "markdown_and_json"),
+            prior_outputs={},
+        )
+        if constraints.get("research_summary"):
+            shared["prior_outputs"]["life_insurance_research"] = {
+                "result": constraints["research_summary"],
+                "markdown_report": _summary_text(constraints["research_summary"]),
+                "kickoff_id": None,
+            }
+        execution_plan = _run_ping_os_plan(objective_type, shared)
+        run_record["vertical"] = normalized_vertical
+        run_record["objective_type"] = objective_type
+        run_record["execution_plan"] = execution_plan
+        run_record["updated_at"] = _utc_now_iso()
+
+        prior_outputs = dict(shared["prior_outputs"])
+        for step in execution_plan:
+            workflow_id = step["workflow_id"]
+            workflow_context = _shared_context(
+                objective=objective,
+                business_name=business_name,
+                vertical=normalized_vertical,
+                target_audience=target_audience,
+                geography=normalized_geography,
+                offer=offer,
+                constraints=constraints,
+                output_format=str(constraints.get("output_format") or "markdown_and_json"),
+                prior_outputs=prior_outputs,
+            )
+            workflow_inputs = _ping_os_workflow_inputs(workflow_id, workflow_context)
+            result = await run_crewai_workflow_and_wait(
+                workflow_id=workflow_id,
+                inputs=workflow_inputs,
+                timeout_seconds=timeout_seconds if workflow_id == "life_insurance_research" else min(timeout_seconds, 60),
+                poll_interval_seconds=5 if workflow_id == "life_insurance_research" else 2,
+            )
+            workflow_results[workflow_id] = result
+            run_record["workflow_results"] = workflow_results
+            run_record["updated_at"] = _utc_now_iso()
+            if not result.get("ok"):
+                status = str(result.get("status") or "failed")
+                message = "Workflow started but did not complete before timeout." if status == "timeout" else str(result.get("error") or result.get("message") or "Workflow failed.")
+                markdown_report = _run_ping_os_failure_report(
+                    objective=objective,
+                    business_name=business_name,
+                    vertical=normalized_vertical,
+                    objective_type=objective_type,
+                    execution_plan=execution_plan,
+                    workflow_results=workflow_results,
+                    error=message,
+                )
+                run_record.update({
+                    "status": "timeout" if status == "timeout" else "failed",
+                    "markdown_report": markdown_report,
+                    "updated_at": _utc_now_iso(),
+                })
+                if status == "timeout":
+                    return {
+                        "ok": False,
+                        "run_id": run_id,
+                        "status": "timeout",
+                        "message": "Workflow started but did not complete before timeout.",
+                        "partial_results": workflow_results,
+                        "markdown_report": markdown_report,
+                    }
+                return {
+                    "ok": False,
+                    "run_id": run_id,
+                    "status": "failed",
+                    "error": message,
+                    "partial_results": workflow_results,
+                    "markdown_report": markdown_report,
+                }
+            prior_outputs[workflow_id] = {
+                "result": result.get("result"),
+                "markdown_report": result.get("markdown_report"),
+                "kickoff_id": result.get("kickoff_id"),
+            }
+
+        final_strategy = _ping_os_final_strategy(
+            business_name=business_name,
+            target_audience=target_audience,
+            geography=normalized_geography,
+            offer=offer,
+            workflow_results=workflow_results,
+        )
+        markdown_report = _ping_os_markdown_report(
+            objective=objective,
+            business_name=business_name,
+            vertical=normalized_vertical,
+            objective_type=objective_type,
+            execution_plan=execution_plan,
+            workflow_results=workflow_results,
+            final_strategy=final_strategy,
+        )
+        compliance = _run_ping_os_compliance_summary(final_strategy)
+        run_record.update({
+            "status": "completed",
+            "final_output": final_strategy,
+            "markdown_report": markdown_report,
+            "updated_at": _utc_now_iso(),
+        })
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "status": "completed",
+            "objective": objective,
+            "business_name": business_name,
+            "vertical": normalized_vertical,
+            "objective_type": objective_type,
+            "execution_plan": execution_plan,
+            "workflow_results": workflow_results,
+            "final_strategy": final_strategy,
+            "compliance": compliance,
+            "markdown_report": markdown_report,
+            "artifacts": [],
+            "debug": {
+                "duration_seconds": round(time() - start_time, 3),
+                "kickoff_ids": {
+                    workflow_id: result.get("kickoff_id")
+                    for workflow_id, result in workflow_results.items()
+                },
+                "routing_notes": [
+                    "Routed through stable single-tool Ping OS interface.",
+                    f"Detected objective_type={objective_type}.",
+                ],
+            },
+        }
+    except Exception as exc:
+        error = str(exc)
+        markdown_report = _run_ping_os_failure_report(
+            objective=objective,
+            business_name=business_name,
+            vertical=normalized_vertical or vertical,
+            objective_type=objective_type,
+            execution_plan=execution_plan,
+            workflow_results=workflow_results,
+            error=error,
+        )
+        run_record.update({
+            "status": "failed",
+            "workflow_results": workflow_results,
+            "markdown_report": markdown_report,
+            "updated_at": _utc_now_iso(),
+        })
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "status": "failed",
+            "error": error,
+            "partial_results": workflow_results,
+            "markdown_report": markdown_report,
+        }
 
 
 @mcp.tool()
@@ -1882,28 +2272,7 @@ async def debug_routes(request: Request) -> Response:
 
 @mcp.custom_route("/debug/ping-os", methods=["GET"], include_in_schema=False)
 async def debug_ping_os(request: Request) -> Response:
-    available = [
-        workflow_id
-        for workflow_id in (
-            "life_insurance_research",
-            "life_insurance_seo",
-            "life_insurance_content",
-            "life_insurance_retell",
-            "life_insurance_email",
-            "life_insurance_compliance",
-        )
-        if workflow_id in CREWAI_WORKFLOWS
-    ]
-    return JSONResponse(
-        {
-            "health": True,
-            "supervisor_enabled": True,
-            "supported_verticals": PING_OS_SUPPORTED_VERTICALS,
-            "supported_objective_types": list(PING_OS_OBJECTIVE_TEMPLATES),
-            "available_workflows": available,
-            "run_count": len(PING_OS_RUNS),
-        }
-    )
+    return JSONResponse(_ping_os_debug_payload())
 
 
 app = mcp.http_app(path="/mcp", transport="streamable-http")

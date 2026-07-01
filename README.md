@@ -44,6 +44,7 @@ Set `PUBLIC_BASE_URL` in production, for example `https://mcp-dh2a.onrender.com`
 - `get_crewai_status`: polls `GET /status/{kickoff_id}`.
 - `get_crewai_result`: reads final output from the status response.
 - `get_crewai_workflow_result`: fetches a completed workflow result later by `workflow_id` and `kickoff_id`.
+- `run_ping_os`: the stable ChatGPT-visible command interface for Ping OS objectives, debug, and run retrieval.
 - `create_life_insurance_campaign_package`: runs the Life Insurance Marketing OS sequence and returns one combined compliant campaign package.
 - `run_ping_os_objective`: lets ChatGPT give Ping OS a business objective; the supervisor plans and runs the needed workflows.
 - `get_ping_os_run`: fetches a stored Ping OS supervisor run by `run_id`.
@@ -151,9 +152,12 @@ After redeploying, refresh the ChatGPT connector actions. ChatGPT will see:
 - `get_crewai_status`: checks run state with `GET /status/{kickoff_id}`.
 - `get_crewai_result`: returns the final result from `GET /status/{kickoff_id}`.
 - `get_crewai_workflow_result`: fetches final output later using the workflow route.
+- `run_ping_os`: the preferred permanent interface. ChatGPT sends one business objective and Ping OS handles routing internally.
 - `create_life_insurance_campaign_package`: creates a full MotherlyQuotes-style campaign package by chaining research, content, Retell, email, and compliance workflows.
 - `run_ping_os_objective`: accepts a plain-English business objective, selects a plan, runs workflows, and returns one strategy package.
 - `get_ping_os_run`: retrieves the stored supervisor run record, final JSON, and markdown report.
+
+Going forward, ChatGPT should depend on `run_ping_os` instead of a growing list of workflow-specific tools. Older tools remain for compatibility, diagnostics, and direct workflow testing.
 
 CrewAI status is the source of truth for output. This deployment returns final output in the `/status/{kickoff_id}` payload. The gateway also probes `/result/{kickoff_id}`, `/kickoff/{kickoff_id}`, `/runs/{kickoff_id}`, and `/tasks/{kickoff_id}` as fallbacks.
 
@@ -244,6 +248,61 @@ create_life_insurance_campaign_package(
 
 Ping OS is the supervisor/orchestrator layer for ChatGPT. Instead of calling workflow tools manually, ChatGPT can submit a business objective and let Ping OS choose the workflow graph.
 
+Preferred stable interface:
+
+```python
+run_ping_os(
+    objective="Create a full compliant campaign package to acquire qualified term life insurance leads from new and expecting moms in California.",
+    business_name="MotherlyQuotes",
+    vertical="life_insurance",
+    target_audience="new and expecting moms",
+    geography=["CA"],
+    offer="free life insurance quote check",
+    context={
+        "product_focus": "term life insurance",
+        "competitors": ["Policygenius", "Ethos", "Ladder", "SelectQuote"],
+        "crm_destination": "HubSpot",
+        "followup_channel": "Brevo",
+        "licensed_states": ["CA"],
+        "output_format": "markdown_and_json",
+        "timeout_seconds": 300,
+        "priority": "normal",
+    },
+)
+```
+
+Minimal call with MotherlyQuotes defaults:
+
+```python
+run_ping_os(
+    objective="Research the California life insurance market for new parents.",
+    business_name="MotherlyQuotes",
+    vertical="life_insurance",
+)
+```
+
+Debug through the same tool:
+
+```python
+run_ping_os(
+    objective="debug",
+    business_name="Ping OS",
+    vertical="system",
+    context={"action": "debug"},
+)
+```
+
+Fetch a stored in-memory run through the same tool:
+
+```python
+run_ping_os(
+    objective="get_run",
+    business_name="Ping OS",
+    vertical="system",
+    context={"action": "get_run", "run_id": "ping-os-..."},
+)
+```
+
 Supported verticals:
 
 - `life_insurance`
@@ -255,6 +314,8 @@ Supported objective types:
 - `content_engine`
 - `voice_agent_setup`
 - `compliance_review`
+- `seo_strategy`
+- `email_nurture`
 
 The default life insurance lead-generation plan runs:
 
@@ -265,7 +326,7 @@ The default life insurance lead-generation plan runs:
 5. `life_insurance_email`
 6. `life_insurance_compliance`
 
-ChatGPT should call the supervisor like this:
+Legacy supervisor interface:
 
 ```python
 run_ping_os_objective(
@@ -327,3 +388,9 @@ Run records are stored in the MCP Gateway process memory and include:
 - `kickoff_ids`
 - `final_output`
 - `markdown_report`
+
+Persistent storage should be added later before relying on run retrieval across Render restarts, deploys, or multiple service instances.
+
+## Connector Schema Notes
+
+If ChatGPT only shows older tools such as `fetch_webpage`, `extract_links`, `check_url_status`, `analyze_text`, `run_crewai_automation`, and `call_crewai_endpoint`, the deployed server may still be correct. Verify server-side registration with local FastMCP introspection or by reconnecting the connector. The durable architecture is to expose and depend on one stable command tool, `run_ping_os`, then route future workflows internally.
